@@ -6,10 +6,11 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from .control_model import CONTROL_ROOT
 from .exceptions import SettingsRegistrationError
 
 SectionKind = Literal["object", "map"]
-_RESERVED_ROOT = "FASTAPIEX"
+_RESERVED_ROOT = CONTROL_ROOT.upper()
 
 
 @dataclass(frozen=True)

@@ -220,6 +220,24 @@ def test_case_insensitive_map_lookup_is_ambiguous_for_case_variant_keys(tmp_path
         GetSettings(target="services.api", field="host")
 
 
+def test_case_insensitive_env_override_applies_to_uppercase_declaration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("TEST__APP__NAME", "env-value")
+
+    @Settings("APP")
+    class AppSettings(BaseSettings):
+        NAME: str
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("APP:\n  NAME: yaml\n", encoding="utf-8")
+    init_settings(settings_path=settings_file)
+
+    assert GetSettings(target=AppSettings, field="NAME") == "env-value"
+    assert GetSettings(target="app", field="name") == "env-value"
+
+
 def test_prefixed_settings_path_env_is_used_for_implicit_init(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -519,6 +537,67 @@ def test_fastapiex_namespace_lookup_is_always_case_insensitive(
     assert GetSettings(target="FastAPIEx.Settings.Reload") is False
     assert GetSettings(target="FASTAPIEX.SETTINGS.CASE_SENSITIVE") is True
     assert GetSettings(target=UpperApp, field="name") == "upper"
+
+
+def test_fastapiex_namespace_with_mixed_case_yaml_keys_is_queryable(
+    tmp_path: Path,
+) -> None:
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text(
+        "FastAPIEx:\n  Settings:\n    Reload: always\napp:\n  name: value\n",
+        encoding="utf-8",
+    )
+    init_settings(settings_path=settings_file)
+
+    assert GetSettings(target="FASTAPIEX.SETTINGS.RELOAD") == "always"
+    assert GetSettings(target=AppSettings, field="name") == "value"
+
+
+def test_fastapiex_namespace_with_mixed_case_yaml_keys_stays_queryable_in_case_sensitive_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FASTAPIEX__SETTINGS__CASE_SENSITIVE", "true")
+
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text(
+        "FastAPIEx:\n  Settings:\n    Reload: always\napp:\n  name: value\n",
+        encoding="utf-8",
+    )
+    init_settings(settings_path=settings_file)
+
+    assert GetSettings(target="FASTAPIEX.SETTINGS.RELOAD") == "always"
+    assert GetSettings(target=AppSettings, field="name") == "value"
+
+
+def test_nested_fastapiex_business_field_is_not_normalized_as_control_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FASTAPIEX__SETTINGS__CASE_SENSITIVE", "true")
+
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        fastapiex: dict[str, str]
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text(
+        "app:\n  fastapiex:\n    TokenKey: Value\n",
+        encoding="utf-8",
+    )
+    init_settings(settings_path=settings_file)
+
+    payload = GetSettings(target=AppSettings, field="fastapiex")
+    assert payload["TokenKey"] == "Value"
+    assert "tokenkey" not in payload
 
 
 def test_lww_yaml_change_overrides_older_env_value(
@@ -917,3 +996,309 @@ def test_settings_source_is_process_global_and_singleton(tmp_path: Path) -> None
 
     with pytest.raises(RuntimeError, match="different source"):
         init_settings(settings_path=file_b)
+
+
+def test_reload_true_startup_follows_multi_hop_settings_path_chain(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FASTAPIEX__SETTINGS__RELOAD", "true")
+
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str
+
+    first = tmp_path / "first.yaml"
+    second = tmp_path / "second.yaml"
+    third = tmp_path / "third.yaml"
+
+    first.write_text(
+        f'fastapiex:\n  settings:\n    path: "{second}"\napp:\n  name: first\n',
+        encoding="utf-8",
+    )
+    second.write_text(
+        f'fastapiex:\n  settings:\n    path: "{third}"\napp:\n  name: second\n',
+        encoding="utf-8",
+    )
+    third.write_text("app:\n  name: third\n", encoding="utf-8")
+
+    init_settings(settings_path=first)
+
+    manager = get_settings_manager()
+    assert manager._source is not None
+    assert manager._source.settings_path == third
+    assert GetSettings(target=AppSettings, field="name") == "third"
+
+
+def test_reload_true_runtime_yaml_change_can_trigger_multi_hop_path_switch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FASTAPIEX__SETTINGS__RELOAD", "true")
+
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str
+
+    first = tmp_path / "first.yaml"
+    second = tmp_path / "second.yaml"
+    third = tmp_path / "third.yaml"
+
+    first.write_text("app:\n  name: first\n", encoding="utf-8")
+    second.write_text(
+        f'fastapiex:\n  settings:\n    path: "{third}"\napp:\n  name: second\n',
+        encoding="utf-8",
+    )
+    third.write_text("app:\n  name: third\n", encoding="utf-8")
+
+    init_settings(settings_path=first)
+    assert GetSettings(target=AppSettings, field="name") == "first"
+
+    first.write_text(
+        f'fastapiex:\n  settings:\n    path: "{second}"\napp:\n  name: first-updated\n',
+        encoding="utf-8",
+    )
+
+    manager = get_settings_manager()
+    assert GetSettings(target=AppSettings, field="name") == "third"
+    assert manager._source is not None
+    assert manager._source.settings_path == third
+
+
+def test_fastapiex_controls_with_mixed_case_across_yaml_dotenv_env_follow_source_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("fAsTaPiEx__SeTtInGs__ReLoAd", "true")
+    monkeypatch.setenv("FASTAPIEX__SETTINGS__CASE_SENSITIVE", "false")
+
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text(
+        "FastAPIEx:\n  Settings:\n    Reload: off\n    Case_Sensitive: true\napp:\n  name: yaml-v1\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "FASTAPIEX__SETTINGS__RELOAD=always\nFASTAPIEX__SETTINGS__CASE_SENSITIVE=true\n",
+        encoding="utf-8",
+    )
+
+    init_settings(settings_path=settings_file)
+    assert GetSettings(target="FASTAPIEX.SETTINGS.RELOAD") is True
+    assert GetSettings(target="fastapiex.settings.case_sensitive") is False
+    assert GetSettings(target=AppSettings, field="name") == "yaml-v1"
+
+    settings_file.write_text(
+        "FastAPIEx:\n  Settings:\n    Reload: off\n    Case_Sensitive: true\napp:\n  name: yaml-v2\n",
+        encoding="utf-8",
+    )
+    assert GetSettings(target=AppSettings, field="name") == "yaml-v2"
+
+
+def test_business_nested_fastapiex_path_remains_business_data_in_case_sensitive_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FASTAPIEX__SETTINGS__CASE_SENSITIVE", "true")
+
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        fastapiex: dict[str, dict[str, str]]
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text(
+        "app:\n  fastapiex:\n    Settings:\n      TokenKey: Value\n",
+        encoding="utf-8",
+    )
+    init_settings(settings_path=settings_file)
+
+    assert GetSettings(target=AppSettings, field="fastapiex.Settings.TokenKey") == "Value"
+    assert GetSettings(target="app.fastapiex.settings.tokenkey", default="miss") == "miss"
+    assert GetSettings(target="FASTAPIEX.SETTINGS.CASE_SENSITIVE") is True
+
+
+def test_case_insensitive_mode_handles_extreme_mixed_case_sections_fields_and_maps(
+    tmp_path: Path,
+) -> None:
+    @Settings("CoRe.App")
+    class AppSettings(BaseSettings):
+        title: str
+
+    @SettingsMap("MiXeD.Services")
+    class ServiceSettings(BaseSettings):
+        host: str
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text(
+        "cOrE:\n  aPp:\n    TiTlE: Demo\nmIxEd:\n  sErViCeS:\n    ApI:\n      HoSt: 127.0.0.1\n",
+        encoding="utf-8",
+    )
+    init_settings(settings_path=settings_file)
+
+    assert GetSettings(target="CORE.APP.TITLE") == "Demo"
+    assert GetSettings(target=AppSettings, field="TITLE") == "Demo"
+    assert GetSettings(target="mixed.services.api.host") == "127.0.0.1"
+    assert GetSettings(target=ServiceSettings, field="Api.Host") == "127.0.0.1"
+
+
+def test_case_sensitive_mode_distinguishes_business_key_variants_but_controls_stay_insensitive(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FASTAPIEX__SETTINGS__CASE_SENSITIVE", "true")
+    monkeypatch.setenv("fAsTaPiEx__SeTtInGs__ReLoAd", "off")
+
+    @Settings("App")
+    class AppTitle(BaseSettings):
+        name: str
+
+    @Settings("APP")
+    class UpperAppTitle(BaseSettings):
+        name: str
+
+    @Settings("app")
+    class LowerAppTitle(BaseSettings):
+        name: str
+
+    @SettingsMap("Services")
+    class ServiceSettings(BaseSettings):
+        host: str
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text(
+        "App:\n  name: mixed\nAPP:\n  name: upper\napp:\n  name: lower\n"
+        "Services:\n  API:\n    host: upper-host\n  api:\n    host: lower-host\n",
+        encoding="utf-8",
+    )
+    init_settings(settings_path=settings_file)
+
+    assert GetSettings(target="App", field="name") == "mixed"
+    assert GetSettings(target="APP", field="name") == "upper"
+    assert GetSettings(target="app", field="name") == "lower"
+    assert GetSettings(target=AppTitle, field="name") == "mixed"
+    assert GetSettings(target=UpperAppTitle, field="name") == "upper"
+    assert GetSettings(target=LowerAppTitle, field="name") == "lower"
+
+    assert GetSettings(target="Services.API.host") == "upper-host"
+    assert GetSettings(target="Services.api.host") == "lower-host"
+    services = GetSettings(target=ServiceSettings)
+    assert isinstance(services, dict)
+    assert set(services.keys()) == {"API", "api"}
+    assert GetSettings(target="FASTAPIEX.SETTINGS.RELOAD") is False
+
+    with pytest.raises(SettingsResolveError):
+        GetSettings(target="aPP", field="name")
+
+
+def test_combined_extreme_controls_path_hops_and_business_fastapiex_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FASTAPIEX__SETTINGS__RELOAD", "true")
+    monkeypatch.setenv("fAsTaPiEx__SeTtInGs__CaSe_SeNsItIvE", "false")
+
+    @Settings("App")
+    class AppSettings(BaseSettings):
+        name: str
+        fastapiex: dict[str, dict[str, str]]
+
+    @SettingsMap("Services")
+    class ServiceSettings(BaseSettings):
+        host: str
+
+    hop1 = tmp_path / "hop1"
+    hop2 = tmp_path / "hop2"
+    hop3 = tmp_path / "hop3"
+    hop4 = tmp_path / "hop4"
+    hop1.mkdir()
+    hop2.mkdir()
+    hop3.mkdir()
+    hop4.mkdir()
+
+    first = hop1 / "settings.yaml"
+    second = hop2 / "settings.yaml"
+    third = hop3 / "settings.yaml"
+    fourth = hop4 / "settings.yaml"
+
+    (hop1 / ".env").write_text(
+        "FASTAPIEX__SETTINGS__CASE_SENSITIVE=true\nFASTAPIEX__SETTINGS__RELOAD=off\n",
+        encoding="utf-8",
+    )
+    first.write_text(
+        f"FastAPIEx:\n  Settings:\n    Path: \"{second}\"\n"
+        "App:\n  Name: hop1\n  FASTAPIEX:\n    Inner:\n      ToKeN: alpha\n"
+        "Services:\n  Api:\n    Host: hop1-host\n",
+        encoding="utf-8",
+    )
+    second.write_text(
+        f"fAsTaPiEx:\n  sEtTiNgS:\n    pAtH: \"{hop3}\"\n"
+        "app:\n  name: hop2\n  fastapiex:\n    inner:\n      token: beta\n"
+        "services:\n  api:\n    host: hop2-host\n",
+        encoding="utf-8",
+    )
+    third.write_text(
+        "FASTAPIEX:\n  SETTINGS:\n    Reload: always\n"
+        "App:\n  Name: hop3\n  FastAPIEx:\n    InNeR:\n      ToKeN: gamma\n"
+        "Services:\n  Api:\n    Host: hop3-host\n",
+        encoding="utf-8",
+    )
+    fourth.write_text(
+        "app:\n  name: hop4\n  fastapiex:\n    inner:\n      token: delta\n"
+        "services:\n  api:\n    host: hop4-host\n",
+        encoding="utf-8",
+    )
+
+    init_settings(settings_path=first)
+    assert GetSettings(target=AppSettings, field="name") == "hop3"
+    assert GetSettings(target="app.fastapiex.inner.token") == "gamma"
+    assert GetSettings(target="services.api.host") == "hop3-host"
+    assert GetSettings(target="FASTAPIEX.SETTINGS.CASE_SENSITIVE") is False
+    # Path-switch sync re-reads yaml with newer revisions; LWW lets newer yaml override older env values.
+    assert GetSettings(target="FASTAPIEX.SETTINGS.RELOAD") == "always"
+
+    third.write_text(
+        f"FASTAPIEX:\n  SETTINGS:\n    PATH: \"{fourth}\"\n"
+        "App:\n  Name: hop3-updated\n  FastAPIEx:\n    InNeR:\n      ToKeN: gamma2\n"
+        "Services:\n  Api:\n    Host: hop3-updated-host\n",
+        encoding="utf-8",
+    )
+    assert GetSettings(target=AppSettings, field="name") == "hop4"
+    assert GetSettings(target="APP.FASTAPIEX.INNER.TOKEN") == "delta"
+    assert GetSettings(target=ServiceSettings, field="api.host") == "hop4-host"
+
+
+def test_reload_true_with_settings_path_cycle_warns_and_stops_at_current_source(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FASTAPIEX__SETTINGS__RELOAD", "true")
+    caplog.set_level(logging.WARNING)
+
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str
+
+    first = tmp_path / "first.yaml"
+    second = tmp_path / "second.yaml"
+    first.write_text(
+        f'fastapiex:\n  settings:\n    path: "{second}"\napp:\n  name: first\n',
+        encoding="utf-8",
+    )
+    second.write_text(
+        f'fastapiex:\n  settings:\n    path: "{first}"\napp:\n  name: second\n',
+        encoding="utf-8",
+    )
+
+    init_settings(settings_path=first)
+
+    manager = get_settings_manager()
+    assert manager._source is not None
+    assert manager._source.settings_path == second
+    assert GetSettings(target=AppSettings, field="name") == "second"
+
+    warning_messages = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+    assert any("path control cycle detected" in message for message in warning_messages)

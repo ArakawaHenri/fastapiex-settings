@@ -11,17 +11,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ValidationError
 
-from .controls import (
-    BASE_DIR_KEYS,
-    ENV_PREFIX_KEYS,
-    SETTINGS_PATH_KEYS,
-    build_env_controls_snapshot,
-    file_state,
-    normalize_override_path,
-    read_nested_str,
-    runtime_options_from_controls,
-    snapshot_fingerprint,
-)
+from .control_resolver import read_control_model, runtime_options_from_snapshot
+from .controls import build_env_controls_snapshot, file_state, normalize_override_path, snapshot_fingerprint
 from .discovery import (
     diff_module_snapshots,
     discover_module_declarations,
@@ -36,16 +27,16 @@ from .loader import (
     load_yaml_settings,
     resolve_env_prefix,
 )
-from .path_lookup import resolve_lookup_path, section_matches_target_type
-from .registry import SettingsSection, get_settings_registry
+from .query_engine import QueryMiss, ResolveRequest, evaluate_request, resolve_default
+from .registry import get_settings_registry
 from .runtime_options import ReloadMode
 from .schema_builder import BuiltSchema, build_root_settings_model
+from .snapshot_projection import project_snapshot_for_validation
 
 logger = logging.getLogger(__name__)
 
 _NO_DEFAULT = object()
 
-ResolveAPI = Literal["settings", "map"]
 SourceSyncMode = Literal["none", "auto", "reload", "full"]
 _SOURCE_STATE = tuple[str, bool, int, int] | None
 _SNAPSHOT_READER = Callable[[], tuple[dict[str, Any], _SOURCE_STATE]]
@@ -64,29 +55,6 @@ class SettingsSource:
     env_prefix: str
     case_sensitive: bool
     reload_mode: ReloadMode
-
-
-@dataclass(frozen=True)
-class _ResolveRequest:
-    api: ResolveAPI
-    target: str | type[object] | None
-    field: str | None
-    default: object
-    has_default: bool
-
-    def cache_key(self) -> str:
-        target_repr: str
-        if isinstance(self.target, str):
-            target_repr = f"str:{self.target}"
-        elif isinstance(self.target, type):
-            target_repr = f"type:{self.target.__module__}.{self.target.__qualname__}"
-        else:
-            target_repr = "none"
-        return f"{self.api}|{target_repr}|field={self.field}"
-
-
-class _QueryMiss(Exception):
-    pass
 
 
 class SettingsManager:
@@ -194,7 +162,7 @@ class SettingsManager:
         default: object = _NO_DEFAULT,
         has_default: bool = False,
     ) -> Any:
-        request = _ResolveRequest(
+        request = ResolveRequest(
             api="settings",
             target=target,
             field=field,
@@ -210,7 +178,7 @@ class SettingsManager:
         default: object = _NO_DEFAULT,
         has_default: bool = False,
     ) -> Mapping[str, Any]:
-        request = _ResolveRequest(
+        request = ResolveRequest(
             api="map",
             target=target,
             field=None,
@@ -262,7 +230,7 @@ class SettingsManager:
             return self._sync_reload_sources_locked(force=True)
         return self._reload_live_sources_locked()
 
-    def _resolve_request(self, request: _ResolveRequest) -> Any:
+    def _resolve_request(self, request: ResolveRequest) -> Any:
         with self._lock:
             query_error: Exception | None = None
             validation_error: SettingsValidationError | None = None
@@ -274,10 +242,10 @@ class SettingsManager:
                     source_sync="auto",
                 )
                 return self._evaluate_request_locked(request)
-            except _QueryMiss as exc:
+            except QueryMiss as exc:
                 query_error = exc
             except (KeyError, IndexError, AttributeError) as exc:
-                query_error = _QueryMiss(str(exc))
+                query_error = QueryMiss(str(exc))
             except SettingsValidationError as exc:
                 validation_error = exc
 
@@ -294,14 +262,14 @@ class SettingsManager:
                     value = self._evaluate_request_locked(request)
                     self._missing_cache.pop(cache_key, None)
                     return value
-                except _QueryMiss as exc:
+                except QueryMiss as exc:
                     query_error = exc
                     self._missing_cache[cache_key] = (
                         get_settings_registry().version(),
                         self._module_fingerprint,
                     )
                 except (KeyError, IndexError, AttributeError) as exc:
-                    query_error = _QueryMiss(str(exc))
+                    query_error = QueryMiss(str(exc))
                     self._missing_cache[cache_key] = (
                         get_settings_registry().version(),
                         self._module_fingerprint,
@@ -312,7 +280,7 @@ class SettingsManager:
             if request.has_default:
                 if validation_error is not None:
                     self._warn_validation_fallback_once_locked(request, validation_error)
-                return self._resolve_from_default_locked(request)
+                return resolve_default(request)
 
             if validation_error is not None:
                 raise validation_error
@@ -320,77 +288,16 @@ class SettingsManager:
                 raise SettingsResolveError(str(query_error)) from query_error
             raise SettingsResolveError("settings value could not be resolved")
 
-    def _evaluate_request_locked(self, request: _ResolveRequest) -> Any:
+    def _evaluate_request_locked(self, request: ResolveRequest) -> Any:
         assert self._settings is not None
         assert self._source is not None
 
-        case_sensitive = self._source.case_sensitive
-        value = self._resolve_target_value_locked(target=request.target, case_sensitive=case_sensitive)
-
-        if request.field is not None:
-            field = request.field.strip()
-            if not field:
-                raise _QueryMiss("field is empty")
-            value = resolve_lookup_path(value, field, case_sensitive=case_sensitive)
-
-        if request.api == "map" and not isinstance(value, Mapping):
-            raise _QueryMiss("resolved value is not a mapping")
-
-        return value
-
-    def _resolve_target_value_locked(
-        self,
-        *,
-        target: str | type[object] | None,
-        case_sensitive: bool,
-    ) -> Any:
-        assert self._settings is not None
-
-        if target is None:
-            raise _QueryMiss("target is not provided")
-
-        if isinstance(target, str):
-            target_text = target.strip()
-            if not target_text:
-                raise _QueryMiss("target is empty")
-            return resolve_lookup_path(self._settings, target_text, case_sensitive=case_sensitive)
-
-        if not isinstance(target, type):
-            raise _QueryMiss("target must be a string path or class")
-
-        section = self._resolve_type_target_locked(target_type=target)
-        # Type-target injection should resolve the declared section exactly, independent of read mode.
-        return resolve_lookup_path(self._settings, section.path_text, case_sensitive=True)
-
-    def _resolve_type_target_locked(self, *, target_type: type[object]) -> SettingsSection:
-        sections = get_settings_registry().sections()
-        target_name = f"{target_type.__module__}.{target_type.__qualname__}"
-        candidates = [section for section in sections if section_matches_target_type(section, target_type)]
-
-        return self._select_unique_type_target_locked(
-            target_name=target_name,
-            candidates=candidates,
+        return evaluate_request(
+            request=request,
+            settings=self._settings,
+            sections=get_settings_registry().sections(),
+            case_sensitive=self._source.case_sensitive,
         )
-
-    def _select_unique_type_target_locked(
-        self,
-        *,
-        target_name: str,
-        candidates: list[SettingsSection],
-    ) -> SettingsSection:
-        if not candidates:
-            raise _QueryMiss(f"target type '{target_name}' did not match any declared section")
-
-        if len(candidates) > 1:
-            matched_paths = ", ".join(sorted(section.path_text for section in candidates))
-            raise _QueryMiss(f"target type '{target_name}' matched multiple sections: {matched_paths}")
-
-        return candidates[0]
-
-    def _resolve_from_default_locked(self, request: _ResolveRequest) -> Any:
-        if request.api == "map" and not isinstance(request.default, Mapping):
-            raise SettingsResolveError("default value for SettingsMap must be a mapping")
-        return request.default
 
     def _should_skip_rediscovery_locked(self, cache_key: str) -> bool:
         marker = self._missing_cache.get(cache_key)
@@ -401,7 +308,7 @@ class SettingsManager:
 
     def _warn_validation_fallback_once_locked(
         self,
-        request: _ResolveRequest,
+        request: ResolveRequest,
         error: SettingsValidationError,
     ) -> None:
         assert self._source is not None
@@ -435,7 +342,7 @@ class SettingsManager:
     def _sync_runtime_options_locked(self) -> bool:
         assert self._source is not None
         controls = self._read_controls_snapshot_locked()
-        runtime_options = runtime_options_from_controls(controls)
+        runtime_options = runtime_options_from_snapshot(controls)
         updated = SettingsSource(
             settings_path=self._source.settings_path,
             env_prefix=self._source.env_prefix,
@@ -578,7 +485,8 @@ class SettingsManager:
     def _read_settings_path_from_snapshot_locked(self) -> Path | None:
         assert self._live_config is not None
         snapshot = self._live_config.materialize()
-        return normalize_override_path(read_nested_str(snapshot, SETTINGS_PATH_KEYS))
+        control = read_control_model(snapshot)
+        return normalize_override_path(control.settings_path)
 
     def _maybe_rediscover_modules_locked(self) -> bool:
         current_snapshot = snapshot_imported_modules()
@@ -608,6 +516,11 @@ class SettingsManager:
         assert self._schema is not None
 
         raw = self._live_config.materialize()
+        raw = project_snapshot_for_validation(
+            raw,
+            root_model=self._schema.root_model,
+            case_sensitive=self._source.case_sensitive,
+        )
         try:
             self._settings = self._schema.root_model.model_validate(raw)
         except ValidationError as exc:
@@ -677,9 +590,10 @@ class SettingsManager:
         env_prefix: str | None,
     ) -> SettingsSource:
         controls = build_env_controls_snapshot()
+        control = read_control_model(controls)
         arg_settings_path = normalize_override_path(settings_path)
-        env_settings_path = normalize_override_path(read_nested_str(controls, SETTINGS_PATH_KEYS))
-        env_base_dir = normalize_override_path(read_nested_str(controls, BASE_DIR_KEYS), as_directory=True)
+        env_settings_path = normalize_override_path(control.settings_path)
+        env_base_dir = normalize_override_path(control.base_dir, as_directory=True)
         if arg_settings_path is not None:
             resolved_path = arg_settings_path
         elif env_settings_path is not None:
@@ -689,8 +603,8 @@ class SettingsManager:
         else:
             resolved_path = (Path.cwd().resolve() / "settings.yaml").resolve()
 
-        runtime_options = runtime_options_from_controls(controls)
-        control_env_prefix = read_nested_str(controls, ENV_PREFIX_KEYS) or ""
+        runtime_options = runtime_options_from_snapshot(controls)
+        control_env_prefix = control.env_prefix
         resolved_env_prefix = resolve_env_prefix(env_prefix if env_prefix is not None else control_env_prefix)
         return SettingsSource(
             settings_path=resolved_path,

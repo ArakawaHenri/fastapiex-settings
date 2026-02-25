@@ -5,12 +5,13 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from .key_policy import is_control_root
 from .registry import SettingsSection
 
 
 def resolve_lookup_path(root: object, path: str, *, case_sensitive: bool) -> Any:
     segments = _split_lookup_path(path)
-    reserved_namespace = bool(segments) and segments[0].casefold() == "fastapiex"
+    reserved_namespace = bool(segments) and is_control_root(segments[0])
     current: Any = root
     for segment in segments:
         effective_case_sensitive = case_sensitive and not reserved_namespace

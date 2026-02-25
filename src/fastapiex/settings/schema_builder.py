@@ -34,8 +34,7 @@ def build_root_settings_model(
     field_defs: dict[str, tuple[Any, Any]] = {}
     for child_name, child in sorted(root.children.items()):
         if child.decl is not None and child.decl.kind == "map":
-            map_model = child.decl.model
-            field_defs[child_name] = (dict[str, map_model], Field(default_factory=dict))  # type: ignore[valid-type]
+            field_defs[child_name] = _build_map_field_def(child.decl.model)
             continue
 
         child_model = _build_object_model(child, model_name=f"{model_name}_{child_name}")
@@ -45,14 +44,10 @@ def build_root_settings_model(
     if "fastapiex" not in field_defs:
         field_defs["fastapiex"] = (dict[str, Any], Field(default_factory=dict))
 
-    root_model = cast(
-        type[BaseModel],
-        create_model(  # type: ignore[call-overload]
-            model_name,
-            __base__=BaseModel,
-            __config__=ConfigDict(extra="ignore"),
-            **field_defs,
-        ),
+    root_model = _create_dynamic_model(
+        model_name=model_name,
+        base_model=BaseModel,
+        field_defs=field_defs,
     )
     return BuiltSchema(root_model=root_model, sections=tuple(sorted(sections, key=lambda item: item.path)))
 
@@ -98,13 +93,29 @@ def _build_object_model(node: _TreeNode, *, model_name: str) -> type[BaseModel]:
             )
 
         if child.decl is not None and child.decl.kind == "map":
-            map_model = child.decl.model
-            field_defs[child_name] = (dict[str, map_model], Field(default_factory=dict))  # type: ignore[valid-type]
+            field_defs[child_name] = _build_map_field_def(child.decl.model)
             continue
 
         child_model = _build_object_model(child, model_name=f"{model_name}_{child_name}")
         field_defs[child_name] = (child_model, Field(default_factory=child_model))
 
+    return _create_dynamic_model(
+        model_name=model_name,
+        base_model=base_model,
+        field_defs=field_defs,
+    )
+
+
+def _build_map_field_def(map_model: type[BaseModel]) -> tuple[Any, Any]:
+    return (dict[str, map_model], Field(default_factory=dict))  # type: ignore[valid-type]
+
+
+def _create_dynamic_model(
+    *,
+    model_name: str,
+    base_model: type[BaseModel],
+    field_defs: dict[str, tuple[Any, Any]],
+) -> type[BaseModel]:
     return cast(
         type[BaseModel],
         create_model(  # type: ignore[call-overload]
