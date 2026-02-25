@@ -58,47 +58,18 @@ class LiveConfigStore:
         return self.replace_sources({source: mapping})
 
     def replace_sources(self, updates: Mapping[SourceName, Mapping[Any, Any]]) -> bool:
-        unknown_sources = set(updates) - set(_SOURCE_ORDER)
-        if unknown_sources:
-            unknown = ", ".join(sorted(str(source) for source in unknown_sources))
-            raise ValueError(f"unknown sources: {unknown}")
-
-        touched_sources: list[SourceName] = []
-        removed_by_source: dict[SourceName, list[tuple[str, ...]]] = {}
-        updated_by_source: dict[SourceName, dict[tuple[str, ...], Any]] = {}
-
-        for source, mapping in updates.items():
-            next_flat = _flatten_mapping(mapping)
-            current = self._current_source_values(source)
-
-            removed = [path for path in current if path not in next_flat]
-            updated: dict[tuple[str, ...], Any] = {}
-            for path, value in next_flat.items():
-                existing = current.get(path)
-                if existing is None or existing.value != value:
-                    updated[path] = deepcopy(value)
-
-            if removed or updated:
-                touched_sources.append(source)
-                removed_by_source[source] = removed
-                updated_by_source[source] = updated
-
+        self._validate_update_sources(updates)
+        touched_sources, removed_by_source, updated_by_source = self._plan_source_updates(updates)
         if not touched_sources:
             return False
 
         rev_by_source = self._allocate_revs(touched_sources)
-        for source in _sort_sources(touched_sources):
-            for path in removed_by_source.get(source, []):
-                slot = self._slots.get(path)
-                if slot is None:
-                    continue
-                slot.pop(source, None)
-                if not slot:
-                    del self._slots[path]
-
-            for path, value in updated_by_source.get(source, {}).items():
-                slot = self._slots.setdefault(path, {})
-                slot[source] = _SourceValue(rev=rev_by_source[source], value=value)
+        self._apply_source_updates(
+            touched_sources=touched_sources,
+            removed_by_source=removed_by_source,
+            updated_by_source=updated_by_source,
+            rev_by_source=rev_by_source,
+        )
 
         self._version += 1
         self._cached_materialized = None
@@ -106,22 +77,98 @@ class LiveConfigStore:
 
     def materialize(self) -> dict[str, Any]:
         if self._cached_materialized is None:
-            winners: dict[tuple[str, ...], tuple[int, int, Any]] = {}
-            for path, slot in self._slots.items():
-                source, value = _pick_winner(slot)
-                winners[path] = (value.rev, _SOURCE_PRIORITY[source], value.value)
-
-            merged: dict[str, Any] = {}
-            ordered = sorted(
-                winners.items(),
-                key=lambda item: (item[1][0], item[1][1], len(item[0]), item[0]),
-            )
-            for path, (_, _, value) in ordered:
-                _set_nested_force(merged, path, deepcopy(value))
-
-            self._cached_materialized = merged
+            winners = self._compute_winners()
+            self._cached_materialized = _build_materialized_snapshot(winners)
 
         return deepcopy(self._cached_materialized)
+
+    def _validate_update_sources(self, updates: Mapping[SourceName, Mapping[Any, Any]]) -> None:
+        unknown_sources = set(updates) - set(_SOURCE_ORDER)
+        if not unknown_sources:
+            return
+        unknown = ", ".join(sorted(str(source) for source in unknown_sources))
+        raise ValueError(f"unknown sources: {unknown}")
+
+    def _plan_source_updates(
+        self,
+        updates: Mapping[SourceName, Mapping[Any, Any]],
+    ) -> tuple[
+        list[SourceName],
+        dict[SourceName, list[tuple[str, ...]]],
+        dict[SourceName, dict[tuple[str, ...], Any]],
+    ]:
+        touched_sources: list[SourceName] = []
+        removed_by_source: dict[SourceName, list[tuple[str, ...]]] = {}
+        updated_by_source: dict[SourceName, dict[tuple[str, ...], Any]] = {}
+
+        for source, mapping in updates.items():
+            removed, updated = self._diff_source_update(source, mapping)
+            if not removed and not updated:
+                continue
+            touched_sources.append(source)
+            removed_by_source[source] = removed
+            updated_by_source[source] = updated
+
+        return touched_sources, removed_by_source, updated_by_source
+
+    def _diff_source_update(
+        self,
+        source: SourceName,
+        mapping: Mapping[Any, Any],
+    ) -> tuple[list[tuple[str, ...]], dict[tuple[str, ...], Any]]:
+        next_flat = _flatten_mapping(mapping)
+        current = self._current_source_values(source)
+
+        removed = [path for path in current if path not in next_flat]
+        updated: dict[tuple[str, ...], Any] = {}
+        for path, value in next_flat.items():
+            existing = current.get(path)
+            if existing is None or existing.value != value:
+                updated[path] = deepcopy(value)
+        return removed, updated
+
+    def _apply_source_updates(
+        self,
+        *,
+        touched_sources: list[SourceName],
+        removed_by_source: Mapping[SourceName, list[tuple[str, ...]]],
+        updated_by_source: Mapping[SourceName, Mapping[tuple[str, ...], Any]],
+        rev_by_source: Mapping[SourceName, int],
+    ) -> None:
+        for source in _sort_sources(touched_sources):
+            self._apply_source_path_removals(source=source, paths=removed_by_source.get(source, []))
+            self._apply_source_path_updates(
+                source=source,
+                updates=updated_by_source.get(source, {}),
+                rev=rev_by_source[source],
+            )
+
+    def _apply_source_path_removals(self, *, source: SourceName, paths: list[tuple[str, ...]]) -> None:
+        for path in paths:
+            slot = self._slots.get(path)
+            if slot is None:
+                continue
+            slot.pop(source, None)
+            if not slot:
+                del self._slots[path]
+
+    def _apply_source_path_updates(
+        self,
+        *,
+        source: SourceName,
+        updates: Mapping[tuple[str, ...], Any],
+        rev: int,
+    ) -> None:
+        for path, value in updates.items():
+            slot = self._slots.setdefault(path, {})
+            slot[source] = _SourceValue(rev=rev, value=value)
+
+    def _compute_winners(self) -> dict[tuple[str, ...], tuple[int, int, Any]]:
+        winners: dict[tuple[str, ...], tuple[int, int, Any]] = {}
+        for path, slot in self._slots.items():
+            source, value = _pick_winner(slot)
+            winners[path] = (value.rev, _SOURCE_PRIORITY[source], value.value)
+        return winners
 
     def _current_source_values(self, source: SourceName) -> dict[tuple[str, ...], _SourceValue]:
         result: dict[tuple[str, ...], _SourceValue] = {}
@@ -196,6 +243,17 @@ def _build_seed_slots(
 def _sort_sources(sources: list[SourceName]) -> list[SourceName]:
     ordered_set = set(sources)
     return [source for source in _SOURCE_ORDER if source in ordered_set]
+
+
+def _build_materialized_snapshot(winners: Mapping[tuple[str, ...], tuple[int, int, Any]]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    ordered = sorted(
+        winners.items(),
+        key=lambda item: (item[1][0], item[1][1], len(item[0]), item[0]),
+    )
+    for path, (_, _, value) in ordered:
+        _set_nested_force(merged, path, deepcopy(value))
+    return merged
 
 
 def _set_nested_force(target: dict[str, Any], path: tuple[str, ...], value: Any) -> None:

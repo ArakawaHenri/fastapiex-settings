@@ -343,6 +343,7 @@ Plain-key behavior:
 - `FASTAPIEX__*` keys are ingested into live snapshot as plain keys under `fastapiex.*`.
 - they are readable via `GetSettings("fastapiex....")`.
 - declaration is still forbidden: users cannot declare `@Settings("fastapiex...")` / `@SettingsMap("fastapiex...")`.
+- mixed-case keys from file/env (for example `FastAPIEx.Settings.Reload`) are normalized into canonical `fastapiex.*`.
 
 Supported controls:
 
@@ -357,6 +358,7 @@ Supported controls:
 - cannot start with `FASTAPIEX__`.
 - empty prefix means plain keys are considered business keys.
 - non-empty prefix is stripped as raw string.
+- prefix matching follows runtime case mode: case-insensitive when `CASE_SENSITIVE=false`, exact when `CASE_SENSITIVE=true`.
 
 Equivalent examples (all readable by `GetSettings("one")`):
 

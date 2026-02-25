@@ -80,6 +80,20 @@ def test_loader_stack_case_sensitive_env_mapping_preserves_case(
     assert "app" not in raw
 
 
+def test_loader_stack_prefix_match_is_case_insensitive_when_case_insensitive_mode(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("app:\n  name: yaml\n", encoding="utf-8")
+
+    monkeypatch.setenv("test__APP__NAME", "env-value")
+
+    raw = _materialize_raw(path=settings_file, env_prefix="TEST__", case_sensitive=False)
+
+    assert raw["app"]["name"] == "env-value"
+
+
 def test_runtime_control_env_keys_are_plain_snapshot_keys(monkeypatch, tmp_path: Path) -> None:
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("app:\n  name: yaml\n", encoding="utf-8")
