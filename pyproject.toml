@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fastapiex-settings"
+version = "0.1.0"
+description = "Global settings runtime extension for FastAPIEX"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Henri" }]
+dependencies = [
+  "pydantic>=2.8,<3",
+  "PyYAML>=6.0.2,<7",
+]
+
+[project.urls]
+Homepage = "https://github.com/ArakawaHenri/fastapiex-settings"
+Repository = "https://github.com/ArakawaHenri/fastapiex-settings"
+Issues = "https://github.com/ArakawaHenri/fastapiex-settings/issues"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0.0",
+  "mypy>=1.11.0",
+  "ruff>=0.6.0",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_functions = "test_*"
+pythonpath = ["src", "."]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+include = ["src/**/*.py", "tests/**/*.py"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+strict = true
+
+[tool.hatch.build.targets.wheel]
+only-include = ["src"]
+sources = ["src"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src",
+  "tests",
+  "LICENSE",
+  "README.md",
+  "pyproject.toml",
+]
