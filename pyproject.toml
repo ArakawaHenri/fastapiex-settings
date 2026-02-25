@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "fastapiex-settings"
 version = "0.1.0"
-description = "Global settings runtime extension for FastAPIEX"
+description = "Global settings runtime extension for FastAPIEx"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }
