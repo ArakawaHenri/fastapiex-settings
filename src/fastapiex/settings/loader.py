@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -62,9 +63,18 @@ def load_yaml_settings(path: Path) -> dict[str, Any]:
     return raw
 
 
-def load_env_overrides(*, prefix: str = DEFAULT_ENV_PREFIX, case_sensitive: bool) -> dict[str, Any]:
+def load_env_snapshot_raw() -> dict[str, str]:
+    return dict(os.environ)
+
+
+def parse_env_snapshot(
+    raw_env: Mapping[str, str],
+    *,
+    prefix: str = DEFAULT_ENV_PREFIX,
+    case_sensitive: bool,
+) -> dict[str, Any]:
     overrides: dict[str, Any] = {}
-    for env_key, env_val in os.environ.items():
+    for env_key, env_val in raw_env.items():
         parts = key_to_parts(env_key, prefix=prefix, case_sensitive=case_sensitive)
         if parts is None:
             continue
@@ -72,17 +82,25 @@ def load_env_overrides(*, prefix: str = DEFAULT_ENV_PREFIX, case_sensitive: bool
     return overrides
 
 
+def load_env_overrides(*, prefix: str = DEFAULT_ENV_PREFIX, case_sensitive: bool) -> dict[str, Any]:
+    return parse_env_snapshot(
+        load_env_snapshot_raw(),
+        prefix=prefix,
+        case_sensitive=case_sensitive,
+    )
+
+
 def find_dotenv_path(start_dir: Path) -> Path | None:
     candidate = start_dir.resolve() / ".env"
     return candidate if candidate.is_file() else None
 
 
-def load_dotenv_overrides(*, start_dir: Path, prefix: str = DEFAULT_ENV_PREFIX, case_sensitive: bool) -> dict[str, Any]:
+def load_dotenv_snapshot_raw(*, start_dir: Path) -> dict[str, str]:
     dotenv_path = find_dotenv_path(start_dir)
     if dotenv_path is None:
         return {}
 
-    overrides: dict[str, Any] = {}
+    pairs: dict[str, str] = {}
     for raw_line in dotenv_path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -94,10 +112,15 @@ def load_dotenv_overrides(*, start_dir: Path, prefix: str = DEFAULT_ENV_PREFIX, 
 
         key, raw_value = line.split("=", 1)
         env_key = key.strip()
-        parts = key_to_parts(env_key, prefix=prefix, case_sensitive=case_sensitive)
-        if parts is None:
+        if not env_key:
             continue
+        pairs[env_key] = parse_dotenv_value(raw_value)
+    return pairs
 
-        parsed = parse_env_value(parse_dotenv_value(raw_value))
-        set_nested_mapping(overrides, parts, parsed)
-    return overrides
+
+def load_dotenv_overrides(*, start_dir: Path, prefix: str = DEFAULT_ENV_PREFIX, case_sensitive: bool) -> dict[str, Any]:
+    return parse_env_snapshot(
+        load_dotenv_snapshot_raw(start_dir=start_dir),
+        prefix=prefix,
+        case_sensitive=case_sensitive,
+    )

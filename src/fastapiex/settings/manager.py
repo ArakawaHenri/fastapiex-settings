@@ -22,12 +22,13 @@ from .exceptions import SettingsResolveError, SettingsValidationError
 from .live_config import LiveConfigStore, SourceName, source_order
 from .loader import (
     find_dotenv_path,
-    load_dotenv_overrides,
-    load_env_overrides,
+    load_dotenv_snapshot_raw,
+    load_env_snapshot_raw,
     load_yaml_settings,
     resolve_env_prefix,
 )
 from .query_engine import QueryMiss, ResolveRequest, evaluate_request, resolve_default
+from .raw_projection import materialize_control_snapshot, materialize_effective_snapshot
 from .registry import get_settings_registry
 from .runtime_options import ReloadMode
 from .schema_builder import BuiltSchema, build_root_settings_model
@@ -214,11 +215,12 @@ class SettingsManager:
     ) -> None:
         self._ensure_source_locked(implicit=implicit_init)
         source_force_refresh = self._sync_sources_for_mode_locked(mode=source_sync)
-        runtime_changed = self._sync_runtime_options_locked()
+        needs_control_convergence = force_refresh or source_force_refresh or self._settings is None
+        controls_changed = self._converge_controls_locked() if needs_control_convergence else False
         module_changed = self._maybe_rediscover_modules_locked() if rediscover_modules else False
         self._refresh_runtime_locked(
             reason=reason,
-            force=force_refresh or source_force_refresh or runtime_changed or module_changed,
+            force=force_refresh or source_force_refresh or controls_changed or module_changed,
         )
 
     def _sync_sources_for_mode_locked(self, *, mode: SourceSyncMode) -> bool:
@@ -339,19 +341,38 @@ class SettingsManager:
         self._reload_live_sources_locked()
         logger.info("settings initialized implicitly source=%s", self._source)
 
-    def _sync_runtime_options_locked(self) -> bool:
+    def _converge_controls_locked(self) -> bool:
         assert self._source is not None
-        controls = self._read_controls_snapshot_locked()
-        runtime_options = runtime_options_from_snapshot(controls)
-        updated = SettingsSource(
-            settings_path=self._source.settings_path,
-            env_prefix=self._source.env_prefix,
-            case_sensitive=runtime_options.case_sensitive,
-            reload_mode=runtime_options.reload_mode,
-        )
-        changed = updated != self._source
-        self._source = updated
-        return changed
+        assert self._live_config is not None
+
+        changed = False
+        visited_paths: set[Path] = {self._source.settings_path}
+
+        while True:
+            control_snapshot = self._materialize_control_snapshot_locked()
+            next_source = self._build_source_from_controls_locked(control_snapshot)
+
+            if next_source.settings_path != self._source.settings_path:
+                if next_source.settings_path in visited_paths:
+                    logger.warning("settings path control cycle detected; keeping path=%s", self._source.settings_path)
+                    stabilized = replace(next_source, settings_path=self._source.settings_path)
+                    changed = changed or (stabilized != self._source)
+                    self._source = stabilized
+                    return changed
+
+                visited_paths.add(next_source.settings_path)
+                changed = True
+                self._source = next_source
+                self._sync_selected_sources_locked(
+                    force=True,
+                    selector=lambda spec: spec.sync_on_path_switch,
+                )
+                continue
+
+            if next_source != self._source:
+                changed = True
+                self._source = next_source
+            return changed
 
     def _maybe_auto_reload_locked(self) -> bool:
         assert self._source is not None
@@ -363,8 +384,7 @@ class SettingsManager:
             self._sync_reload_sources_locked(force=True)
             return True
 
-        self._sync_reload_sources_locked(force=False)
-        return False
+        return self._sync_reload_sources_locked(force=False)
 
     def _reload_live_sources_locked(self) -> bool:
         assert self._source is not None
@@ -381,8 +401,7 @@ class SettingsManager:
 
         changed = self._live_config.reset(source_payloads)
         self._source_states = source_states
-        switched = self._sync_settings_path_from_snapshot_locked()
-        return changed or switched
+        return changed
 
     def _sync_reload_sources_locked(self, *, force: bool) -> bool:
         assert self._source is not None
@@ -392,11 +411,7 @@ class SettingsManager:
             force=force,
             selector=lambda spec: spec.sync_on_reload,
         )
-        if not force and not changed:
-            return False
-
-        switched = self._sync_settings_path_from_snapshot_locked()
-        return changed or switched
+        return changed
 
     def _sync_selected_sources_locked(
         self,
@@ -444,49 +459,45 @@ class SettingsManager:
     def _read_dotenv_snapshot_locked(self) -> tuple[dict[str, Any], _SOURCE_STATE]:
         assert self._source is not None
         start_dir = self._source.settings_path.parent
-        mapping = load_dotenv_overrides(
-            start_dir=start_dir,
-            prefix=self._source.env_prefix,
-            case_sensitive=self._source.case_sensitive,
-        )
+        mapping = load_dotenv_snapshot_raw(start_dir=start_dir)
         return mapping, file_state(find_dotenv_path(start_dir))
 
     def _read_env_snapshot_locked(self) -> tuple[dict[str, Any], _SOURCE_STATE]:
+        return load_env_snapshot_raw(), None
+
+    def _build_source_from_controls_locked(self, control_snapshot: Mapping[str, Any]) -> SettingsSource:
         assert self._source is not None
-        mapping = load_env_overrides(
-            prefix=self._source.env_prefix,
+
+        control = read_control_model(control_snapshot)
+        runtime_options = runtime_options_from_snapshot(control_snapshot)
+
+        next_settings_path = normalize_override_path(control.settings_path)
+        if next_settings_path is None:
+            base_dir = normalize_override_path(control.base_dir, as_directory=True)
+            if base_dir is not None:
+                next_settings_path = (base_dir / "settings.yaml").resolve()
+            else:
+                next_settings_path = self._source.settings_path
+
+        return SettingsSource(
+            settings_path=next_settings_path,
+            env_prefix=resolve_env_prefix(control.env_prefix),
+            case_sensitive=runtime_options.case_sensitive,
+            reload_mode=runtime_options.reload_mode,
+        )
+
+    def _materialize_control_snapshot_locked(self) -> dict[str, Any]:
+        assert self._live_config is not None
+        return materialize_control_snapshot(self._live_config.entries())
+
+    def _materialize_effective_snapshot_locked(self) -> dict[str, Any]:
+        assert self._source is not None
+        assert self._live_config is not None
+        return materialize_effective_snapshot(
+            self._live_config.entries(),
+            env_prefix=self._source.env_prefix,
             case_sensitive=self._source.case_sensitive,
         )
-        return mapping, None
-
-    def _sync_settings_path_from_snapshot_locked(self) -> bool:
-        assert self._source is not None
-        assert self._live_config is not None
-
-        switched = False
-        visited: set[Path] = {self._source.settings_path}
-        while True:
-            next_path = self._read_settings_path_from_snapshot_locked()
-            if next_path is None or next_path == self._source.settings_path:
-                return switched
-
-            if next_path in visited:
-                logger.warning("settings path control cycle detected; keeping path=%s", self._source.settings_path)
-                return switched
-            visited.add(next_path)
-
-            self._source = replace(self._source, settings_path=next_path)
-            changed = self._sync_selected_sources_locked(
-                force=True,
-                selector=lambda spec: spec.sync_on_path_switch,
-            )
-            switched = switched or changed or True
-
-    def _read_settings_path_from_snapshot_locked(self) -> Path | None:
-        assert self._live_config is not None
-        snapshot = self._live_config.materialize()
-        control = read_control_model(snapshot)
-        return normalize_override_path(control.settings_path)
 
     def _maybe_rediscover_modules_locked(self) -> bool:
         current_snapshot = snapshot_imported_modules()
@@ -515,7 +526,7 @@ class SettingsManager:
             self._registry_version = registry_version
         assert self._schema is not None
 
-        raw = self._live_config.materialize()
+        raw = self._materialize_effective_snapshot_locked()
         raw = project_snapshot_for_validation(
             raw,
             root_model=self._schema.root_model,
@@ -612,11 +623,6 @@ class SettingsManager:
             case_sensitive=runtime_options.case_sensitive,
             reload_mode=runtime_options.reload_mode,
         )
-
-    def _read_controls_snapshot_locked(self) -> Mapping[Any, Any]:
-        assert self._live_config is not None
-        return self._live_config.materialize()
-
 
 _GLOBAL_MANAGER = SettingsManager()
 
