@@ -25,7 +25,7 @@ class _TreeNode:
 def build_root_settings_model(
     sections: list[SettingsSection],
     *,
-    model_name: str = "FastAPIEXRootSettings",
+    model_name: str = "FastAPIExRootSettings",
 ) -> BuiltSchema:
     root = _TreeNode(name="__root__")
     for section in sorted(sections, key=lambda item: item.path):
