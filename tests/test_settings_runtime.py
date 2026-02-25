@@ -406,6 +406,23 @@ def test_reserved_prefix_is_rejected() -> None:
             enabled: bool = True
 
 
+def test_invalid_registration_does_not_poison_registry(tmp_path: Path) -> None:
+    with pytest.raises(SettingsRegistrationError):
+
+        @Settings("FASTAPIEX.internal")
+        class InvalidSettings(BaseSettings):
+            enabled: bool = True
+
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str = "demo"
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("app:\n  name: ok\n", encoding="utf-8")
+    init_settings(settings_path=settings_file)
+    assert GetSettings(target=AppSettings, field="name") == "ok"
+
+
 def test_settings_prefix_is_not_reserved_anymore() -> None:
     @Settings("settings.runtime")
     class RuntimeSettings(BaseSettings):
@@ -745,6 +762,12 @@ def test_dotenv_can_be_registered_as_runtime_sync_source(
 
     dotenv_file.write_text("TEST__APP__NAME=dotenv-v3\n", encoding="utf-8")
     assert GetSettings(target=AppSettings, field="name") == "dotenv-v3"
+
+
+def test_register_source_sync_rejects_unknown_source() -> None:
+    manager = get_settings_manager()
+    with pytest.raises(ValueError, match="unknown source 'custom'"):
+        manager.register_source_sync("custom", read_snapshot=lambda: ({}, None))
 
 
 def test_dotenv_path_switch_sync_can_be_enabled_explicitly(
