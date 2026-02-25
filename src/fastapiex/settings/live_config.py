@@ -23,6 +23,14 @@ class _SourceValue:
     value: Any
 
 
+@dataclass(frozen=True)
+class SourceEntry:
+    source: SourceName
+    path: tuple[str, ...]
+    rev: int
+    value: Any
+
+
 class LiveConfigStore:
     """Source-aware raw configuration state using LWW + source-priority tie-break."""
 
@@ -81,6 +89,21 @@ class LiveConfigStore:
             self._cached_materialized = _build_materialized_snapshot(winners)
 
         return deepcopy(self._cached_materialized)
+
+    def entries(self) -> tuple[SourceEntry, ...]:
+        rows: list[SourceEntry] = []
+        for path, slot in self._slots.items():
+            for source, value in slot.items():
+                rows.append(
+                    SourceEntry(
+                        source=source,
+                        path=path,
+                        rev=value.rev,
+                        value=deepcopy(value.value),
+                    )
+                )
+        rows.sort(key=lambda row: (row.rev, _SOURCE_PRIORITY[row.source], row.path, row.source))
+        return tuple(rows)
 
     def _validate_update_sources(self, updates: Mapping[SourceName, Mapping[Any, Any]]) -> None:
         unknown_sources = set(updates) - set(_SOURCE_ORDER)
@@ -269,3 +292,7 @@ def _set_nested_force(target: dict[str, Any], path: tuple[str, ...], value: Any)
 
 def source_order() -> tuple[SourceName, ...]:
     return _SOURCE_ORDER
+
+
+def source_priority(source: SourceName) -> int:
+    return _SOURCE_PRIORITY[source]

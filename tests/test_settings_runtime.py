@@ -292,6 +292,31 @@ def test_prefixed_base_dir_env_is_used_for_implicit_init(
     assert GetSettings(target=AppSettings, field="name") == "from-base-dir"
 
 
+def test_snapshot_control_env_prefix_reprojects_env_from_raw(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("FASTAPIEX__SETTINGS__ENV_PREFIX", raising=False)
+    monkeypatch.setenv("TEST__APP__NAME", "from-test")
+    monkeypatch.setenv("ALT__APP__NAME", "from-alt")
+
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text(
+        "fastapiex:\n  settings:\n    env_prefix: ALT__\napp:\n  name: from-yaml\n",
+        encoding="utf-8",
+    )
+    init_settings(settings_path=settings_file)
+
+    manager = get_settings_manager()
+    assert manager._source is not None
+    assert manager._source.env_prefix == "ALT__"
+    assert GetSettings(target=AppSettings, field="name") == "from-alt"
+
+
 def test_case_sensitive_true_on_posix_allows_distinct_section_names(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -315,6 +340,31 @@ def test_case_sensitive_true_on_posix_allows_distinct_section_names(
     assert GetSettings(target="app", field="name") == "lower"
     assert GetSettings(target=UpperApp, field="name") == "upper"
     assert GetSettings(target=LowerApp, field="name") == "lower"
+
+
+def test_snapshot_control_case_sensitive_is_applied_before_env_projection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(os, "name", "posix", raising=False)
+    monkeypatch.setenv("TEST__APP__name", "upper")
+    monkeypatch.setenv("TEST__app__name", "lower")
+
+    @Settings("APP")
+    class UpperApp(BaseSettings):
+        name: str
+
+    @Settings("app")
+    class LowerApp(BaseSettings):
+        name: str
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("fastapiex:\n  settings:\n    case_sensitive: true\n", encoding="utf-8")
+    init_settings(settings_path=settings_file)
+
+    assert GetSettings(target=UpperApp, field="name") == "upper"
+    assert GetSettings(target=LowerApp, field="name") == "lower"
+    assert GetSettings(target="FASTAPIEX.SETTINGS.CASE_SENSITIVE") is True
 
 
 def test_case_sensitive_true_is_ignored_on_windows(
