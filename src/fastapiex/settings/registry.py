@@ -82,26 +82,36 @@ class SettingsRegistry:
             raise SettingsRegistrationError(f"unsupported section kind: {kind!r}")
 
         model = cls
-        for existing_model, existing_record in list(self._records_by_model.items()):
-            if existing_record.owner_module != owner_module:
-                continue
-            if existing_record.owner_identity == owner_identity:
-                continue
-            del self._records_by_model[existing_model]
+        previous_records = dict(self._records_by_model)
+        previous_sections = self._sections_by_path
+        previous_version = self._version
 
-        existing = self._records_by_model.get(model)
-        candidate = _SectionRecord(
-            raw_path=raw_path,
-            model=model,
-            kind=kind,
-            owner_module=owner_module,
-            owner_identity=owner_identity,
-        )
-        if existing == candidate:
-            return
+        try:
+            for existing_model, existing_record in list(self._records_by_model.items()):
+                if existing_record.owner_module != owner_module:
+                    continue
+                if existing_record.owner_identity == owner_identity:
+                    continue
+                del self._records_by_model[existing_model]
 
-        self._records_by_model[model] = candidate
-        self._reindex()
+            existing = self._records_by_model.get(model)
+            candidate = _SectionRecord(
+                raw_path=raw_path,
+                model=model,
+                kind=kind,
+                owner_module=owner_module,
+                owner_identity=owner_identity,
+            )
+            if existing == candidate:
+                return
+
+            self._records_by_model[model] = candidate
+            self._reindex()
+        except SettingsRegistrationError:
+            self._records_by_model = previous_records
+            self._sections_by_path = previous_sections
+            self._version = previous_version
+            raise
 
     def unregister_owner(self, owner_module: str, *, owner_identity: int | None = None) -> None:
         removed = False

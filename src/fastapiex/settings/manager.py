@@ -96,6 +96,10 @@ class SettingsManager:
         sync_on_path_switch: bool | None = None,
     ) -> None:
         with self._lock:
+            if source not in source_order():
+                allowed = ", ".join(source_order())
+                raise ValueError(f"unknown source '{source}'; expected one of: {allowed}")
+
             current = self._source_sync_specs.get(source)
             if read_snapshot is None:
                 if current is None:
