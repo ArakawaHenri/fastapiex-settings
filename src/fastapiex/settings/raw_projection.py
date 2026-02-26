@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 from .control_model import CONTROL_ENV_PREFIX, CONTROL_ROOT
 from .env_keypath import key_to_parts
@@ -12,11 +13,62 @@ from .live_config import SourceEntry, source_priority
 _WinnerMeta = tuple[int, int, Any]
 _ProjectedEntry = tuple[tuple[str, ...], Any]
 _Projector = Callable[[SourceEntry], _ProjectedEntry | None]
+_PathResolver = Callable[[str], tuple[str, ...] | None]
+
+
+class _ProjectionPolicy(Protocol):
+    def project(self, entry: SourceEntry) -> _ProjectedEntry | None: ...
+
+
+@dataclass(frozen=True)
+class _ControlProjectionPolicy:
+    control_root: str = CONTROL_ROOT
+    control_env_prefix: str = CONTROL_ENV_PREFIX
+
+    def project(self, entry: SourceEntry) -> _ProjectedEntry | None:
+        if entry.source == "yaml":
+            return self._project_yaml(entry)
+        return _project_env_entry(entry, key_to_path=self._control_env_key_to_path)
+
+    def _project_yaml(self, entry: SourceEntry) -> _ProjectedEntry | None:
+        if not entry.path:
+            return None
+        if entry.path[0].casefold() != self.control_root.casefold():
+            return None
+        canonical_path = tuple(segment.casefold() for segment in entry.path)
+        return (canonical_path, entry.value)
+
+    def _control_env_key_to_path(self, env_key: str) -> tuple[str, ...] | None:
+        if not env_key.upper().startswith(self.control_env_prefix):
+            return None
+        raw_parts = env_key.split("__")
+        if any(not part for part in raw_parts):
+            return None
+        return tuple(part.casefold() for part in raw_parts)
+
+
+@dataclass(frozen=True)
+class _SettingsProjectionPolicy:
+    env_prefix: str
+    case_sensitive: bool
+
+    def project(self, entry: SourceEntry) -> _ProjectedEntry | None:
+        if entry.source == "yaml":
+            return _project_yaml_entry(entry)
+        return _project_env_entry(entry, key_to_path=self._settings_env_key_to_path)
+
+    def _settings_env_key_to_path(self, env_key: str) -> tuple[str, ...] | None:
+        parts = key_to_parts(env_key, prefix=self.env_prefix, case_sensitive=self.case_sensitive)
+        if parts is None:
+            return None
+        return tuple(parts)
+
+
+_CONTROL_POLICY = _ControlProjectionPolicy()
 
 
 def materialize_control_snapshot(entries: Iterable[SourceEntry]) -> dict[str, Any]:
-    winners = _collect_projected_winners(entries, projector=_project_control_entry)
-    return _build_snapshot_from_winners(winners)
+    return _materialize_snapshot(entries, policy=_CONTROL_POLICY)
 
 
 def materialize_effective_snapshot(
@@ -25,14 +77,12 @@ def materialize_effective_snapshot(
     env_prefix: str,
     case_sensitive: bool,
 ) -> dict[str, Any]:
-    def _project(entry: SourceEntry) -> _ProjectedEntry | None:
-        return _project_settings_entry(
-            entry,
-            env_prefix=env_prefix,
-            case_sensitive=case_sensitive,
-        )
+    policy = _SettingsProjectionPolicy(env_prefix=env_prefix, case_sensitive=case_sensitive)
+    return _materialize_snapshot(entries, policy=policy)
 
-    winners = _collect_projected_winners(entries, projector=_project)
+
+def _materialize_snapshot(entries: Iterable[SourceEntry], *, policy: _ProjectionPolicy) -> dict[str, Any]:
+    winners = _collect_projected_winners(entries, projector=policy.project)
     return _build_snapshot_from_winners(winners)
 
 
@@ -56,70 +106,26 @@ def _collect_projected_winners(
     return winners
 
 
-def _project_control_entry(entry: SourceEntry) -> _ProjectedEntry | None:
-    if entry.source == "yaml":
-        return _project_yaml_control_entry(entry)
-    return _project_env_control_entry(entry)
-
-
-def _project_settings_entry(
-    entry: SourceEntry,
-    *,
-    env_prefix: str,
-    case_sensitive: bool,
-) -> _ProjectedEntry | None:
-    if entry.source == "yaml":
-        return _project_yaml_settings_entry(entry)
-    return _project_env_settings_entry(
-        entry,
-        env_prefix=env_prefix,
-        case_sensitive=case_sensitive,
-    )
-
-
-def _project_yaml_control_entry(entry: SourceEntry) -> _ProjectedEntry | None:
-    if not entry.path:
-        return None
-    if entry.path[0].casefold() != CONTROL_ROOT.casefold():
-        return None
-    canonical_path = tuple(segment.casefold() for segment in entry.path)
-    return (canonical_path, entry.value)
-
-
-def _project_env_control_entry(entry: SourceEntry) -> _ProjectedEntry | None:
-    env_key = _entry_env_key(entry)
-    if env_key is None:
-        return None
-    if not env_key.upper().startswith(CONTROL_ENV_PREFIX):
-        return None
-
-    raw_parts = env_key.split("__")
-    if any(not part for part in raw_parts):
-        return None
-
-    return (tuple(part.lower() for part in raw_parts), _parse_env_like_value(entry.value))
-
-
-def _project_yaml_settings_entry(entry: SourceEntry) -> _ProjectedEntry | None:
+def _project_yaml_entry(entry: SourceEntry) -> _ProjectedEntry | None:
     if not entry.path:
         return None
     return (entry.path, entry.value)
 
 
-def _project_env_settings_entry(
+def _project_env_entry(
     entry: SourceEntry,
     *,
-    env_prefix: str,
-    case_sensitive: bool,
+    key_to_path: _PathResolver,
 ) -> _ProjectedEntry | None:
     env_key = _entry_env_key(entry)
     if env_key is None:
         return None
 
-    parts = key_to_parts(env_key, prefix=env_prefix, case_sensitive=case_sensitive)
-    if parts is None:
+    path = key_to_path(env_key)
+    if path is None:
         return None
-    return (tuple(parts), _parse_env_like_value(entry.value))
+
+    return (path, _parse_env_like_value(entry.value))
 
 
 def _entry_env_key(entry: SourceEntry) -> str | None:

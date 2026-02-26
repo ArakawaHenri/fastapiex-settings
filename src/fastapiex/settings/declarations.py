@@ -7,7 +7,8 @@ from typing import ClassVar, TypeVar, overload
 from pydantic import BaseModel
 
 from .exceptions import SettingsRegistrationError
-from .registry import SectionKind, get_settings_registry, to_snake_case
+from .registry import SectionKind, get_settings_registry
+from .section_naming import resolve_section_name
 
 _ModelClassT = TypeVar("_ModelClassT", bound=type[BaseModel])
 
@@ -16,17 +17,6 @@ class BaseSettings(BaseModel):
     """Base class for settings declaration models."""
 
     __section__: ClassVar[str]
-
-
-def _resolve_section_name(model: type[BaseModel], explicit: str | None) -> str:
-    if isinstance(explicit, str) and explicit.strip():
-        return explicit.strip()
-
-    declared = getattr(model, "__section__", None)
-    if isinstance(declared, str) and declared.strip():
-        return declared.strip()
-
-    return to_snake_case(model.__name__)
 
 
 def _module_identity(module_name: str) -> int:
@@ -45,7 +35,7 @@ def _register_declared_model(
     if not issubclass(cls, BaseModel):
         raise SettingsRegistrationError("@Settings declarations require a BaseModel subclass")
 
-    resolved_section = _resolve_section_name(cls, section)
+    resolved_section = resolve_section_name(cls, section)
 
     cls.__section__ = resolved_section  # type: ignore[attr-defined]
     cls.__fastapiex_settings_model__ = True  # type: ignore[attr-defined]
