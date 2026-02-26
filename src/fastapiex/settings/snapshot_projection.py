@@ -6,8 +6,8 @@ from typing import Any, get_args, get_origin
 
 from pydantic import BaseModel
 
-from .casefold_mapping import build_casefold_mapping
 from .control_model import CONTROL_ROOT
+from .projection_utils import assign_projected_value, normalize_control_mapping
 
 
 def project_snapshot_for_validation(
@@ -42,7 +42,7 @@ def _project_mapping_to_model(
             case_sensitive=case_sensitive,
             allow_control_root=allow_control_root,
         )
-        _assign_projected_value(projected, target_key, projected_value)
+        assign_projected_value(projected, target_key, projected_value)
 
     return projected
 
@@ -154,24 +154,7 @@ def _resolve_control_root_field_name(
 
 
 def _project_control_mapping(raw: Mapping[Any, Any]) -> dict[str, Any]:
-    return build_casefold_mapping(raw, deepcopy_values=True)
-
-
-def _merge_nested_mapping(target: dict[str, Any], incoming: Mapping[str, Any]) -> None:
-    for key, value in incoming.items():
-        existing = target.get(key)
-        if isinstance(existing, dict) and isinstance(value, Mapping):
-            _merge_nested_mapping(existing, value)
-            continue
-        target[key] = deepcopy(value)
-
-
-def _assign_projected_value(target: dict[str, Any], key: str, value: Any) -> None:
-    existing = target.get(key)
-    if isinstance(existing, dict) and isinstance(value, Mapping):
-        _merge_nested_mapping(existing, value)
-        return
-    target[key] = deepcopy(value)
+    return normalize_control_mapping(raw)
 
 
 def _resolve_field_name(
