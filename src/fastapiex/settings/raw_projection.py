@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from .constants import ENV_KEY_SEPARATOR
 from .control_model import CONTROL_ENV_PREFIX, CONTROL_ROOT
 from .env_keypath import key_to_parts
 from .env_value_parser import parse_env_value
@@ -42,7 +43,7 @@ class _ControlProjectionPolicy:
     def _control_env_key_to_path(self, env_key: str) -> tuple[str, ...] | None:
         if not env_key.upper().startswith(self.control_env_prefix):
             return None
-        raw_parts = env_key.split("__")
+        raw_parts = env_key.split(ENV_KEY_SEPARATOR)
         if any(not part for part in raw_parts):
             return None
         return tuple(part.casefold() for part in raw_parts)

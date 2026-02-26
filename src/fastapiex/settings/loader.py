@@ -7,7 +7,8 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
-from .control_model import CONTROL_ENV_PREFIX, DEFAULT_ENV_PREFIX, SETTINGS_ENV_PREFIX_ENV_KEY
+from .constants import DEFAULT_ENV_PREFIX, DOTENV_EXPORT_PREFIX, DOTENV_FILENAME
+from .control_model import CONTROL_ENV_PREFIX, SETTINGS_ENV_PREFIX_ENV_KEY
 from .env_keypath import key_to_parts, set_nested_mapping
 from .env_value_parser import parse_dotenv_value, parse_env_value
 
@@ -86,7 +87,7 @@ def load_env_overrides(*, prefix: str = DEFAULT_ENV_PREFIX, case_sensitive: bool
 
 
 def find_dotenv_path(start_dir: Path) -> Path | None:
-    candidate = start_dir.resolve() / ".env"
+    candidate = start_dir.resolve() / DOTENV_FILENAME
     return candidate if candidate.is_file() else None
 
 
@@ -100,8 +101,8 @@ def load_dotenv_snapshot_raw(*, start_dir: Path) -> dict[str, str]:
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
-        if line.startswith("export "):
-            line = line[len("export "):].lstrip()
+        if line.startswith(DOTENV_EXPORT_PREFIX):
+            line = line[len(DOTENV_EXPORT_PREFIX):].lstrip()
         if "=" not in line:
             continue
 
