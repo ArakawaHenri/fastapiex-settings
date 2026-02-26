@@ -33,7 +33,7 @@ def build_env_controls_snapshot() -> Mapping[Any, Any]:
 
 
 def snapshot_fingerprint(snapshot: dict[str, int]) -> int:
-    return hash(tuple(sorted(snapshot.items())))
+    return hash(frozenset(snapshot.items()))
 
 
 def file_state(path: Path | None) -> tuple[str, bool, int, int]:

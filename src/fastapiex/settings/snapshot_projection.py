@@ -6,6 +6,7 @@ from typing import Any, get_args, get_origin
 
 from pydantic import BaseModel
 
+from .casefold_mapping import build_casefold_mapping
 from .control_model import CONTROL_ROOT
 
 
@@ -153,21 +154,7 @@ def _resolve_control_root_field_name(
 
 
 def _project_control_mapping(raw: Mapping[Any, Any]) -> dict[str, Any]:
-    projected: dict[str, Any] = {}
-    for key, value in raw.items():
-        if not isinstance(key, str):
-            continue
-        canonical_key = key.casefold()
-        if isinstance(value, Mapping):
-            nested = _project_control_mapping(value)
-            existing = projected.get(canonical_key)
-            if isinstance(existing, dict):
-                _merge_nested_mapping(existing, nested)
-            else:
-                projected[canonical_key] = nested
-            continue
-        projected[canonical_key] = deepcopy(value)
-    return projected
+    return build_casefold_mapping(raw, deepcopy_values=True)
 
 
 def _merge_nested_mapping(target: dict[str, Any], incoming: Mapping[str, Any]) -> None:

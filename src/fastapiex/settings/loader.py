@@ -7,33 +7,28 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
-from .control_model import CONTROL_ENV_PREFIX, DEFAULT_ENV_PREFIX, ENV_PREFIX_ENV_KEYS
+from .control_model import CONTROL_ENV_PREFIX, DEFAULT_ENV_PREFIX, SETTINGS_ENV_PREFIX_ENV_KEY
 from .env_keypath import key_to_parts, set_nested_mapping
 from .env_value_parser import parse_dotenv_value, parse_env_value
 
 _INTERNAL_ENV_RESERVED_PREFIX = CONTROL_ENV_PREFIX
 
 
-def _read_env_override(keys: tuple[str, ...]) -> str | None:
-    normalized = {key.upper() for key in keys}
-    for key in keys:
-        value = os.getenv(key)
-        if value is None:
-            continue
-        stripped = value.strip()
+def read_env_prefix_override() -> str | None:
+    exact = os.getenv(SETTINGS_ENV_PREFIX_ENV_KEY)
+    if exact is not None:
+        stripped = exact.strip()
         if stripped:
             return stripped
+
+    target = SETTINGS_ENV_PREFIX_ENV_KEY.upper()
     for env_key, value in os.environ.items():
-        if env_key.upper() not in normalized:
+        if env_key.upper() != target:
             continue
         stripped = value.strip()
         if stripped:
             return stripped
     return None
-
-
-def read_env_prefix_override() -> str | None:
-    return _read_env_override(ENV_PREFIX_ENV_KEYS)
 
 
 def resolve_env_prefix(prefix: str | None = None) -> str:

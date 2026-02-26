@@ -11,7 +11,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ValidationError
 
-from .control_resolver import read_control_model, runtime_options_from_snapshot
+from .control_model import ControlModel, ReloadMode
+from .control_resolver import read_control_model
 from .controls import build_env_controls_snapshot, file_state, normalize_override_path, snapshot_fingerprint
 from .discovery import (
     diff_module_snapshots,
@@ -30,7 +31,6 @@ from .loader import (
 from .query_engine import QueryMiss, ResolveRequest, evaluate_request, resolve_default
 from .raw_projection import materialize_control_snapshot, materialize_effective_snapshot
 from .registry import get_settings_registry
-from .runtime_options import ReloadMode
 from .schema_builder import BuiltSchema, build_root_settings_model
 from .snapshot_projection import project_snapshot_for_validation
 
@@ -56,6 +56,22 @@ class SettingsSource:
     env_prefix: str
     case_sensitive: bool
     reload_mode: ReloadMode
+
+
+@dataclass(frozen=True)
+class _ResolveAttempt:
+    resolved: bool
+    value: Any = None
+    query_error: QueryMiss | None = None
+    validation_error: SettingsValidationError | None = None
+
+
+@dataclass(frozen=True)
+class _RefreshPlan:
+    should_refresh: bool
+    registry_version: int
+    live_version: int
+    schema_outdated: bool
 
 
 class SettingsManager:
@@ -146,8 +162,7 @@ class SettingsManager:
                 force_refresh=True,
                 rediscover_modules=False,
             )
-            assert self._settings is not None
-            return self._settings
+            return self._active_settings_locked()
 
     def get(self) -> BaseModel:
         with self._lock:
@@ -156,8 +171,7 @@ class SettingsManager:
                 implicit_init=True,
                 source_sync="auto",
             )
-            assert self._settings is not None
-            return self._settings
+            return self._active_settings_locked()
 
     def resolve_settings(
         self,
@@ -204,9 +218,9 @@ class SettingsManager:
                 force_refresh=True,
                 rediscover_modules=False,
             )
-            assert self._settings is not None
+            settings = self._active_settings_locked()
             logger.info("settings reloaded reason=%s", reason)
-            return self._settings
+            return settings
 
     def _prepare_runtime_locked(
         self,
@@ -238,71 +252,97 @@ class SettingsManager:
 
     def _resolve_request(self, request: ResolveRequest) -> Any:
         with self._lock:
-            query_error: Exception | None = None
-            validation_error: SettingsValidationError | None = None
-
-            try:
-                self._prepare_runtime_locked(
-                    reason="resolve:registered",
-                    implicit_init=True,
-                    source_sync="auto",
-                )
-                return self._evaluate_request_locked(request)
-            except QueryMiss as exc:
-                query_error = exc
-            except (KeyError, IndexError, AttributeError) as exc:
-                query_error = QueryMiss(str(exc))
-            except SettingsValidationError as exc:
-                validation_error = exc
+            initial_attempt = self._attempt_resolve_locked(
+                request=request,
+                reason="resolve:registered",
+                rediscover_modules=True,
+            )
+            if initial_attempt.resolved:
+                return initial_attempt.value
 
             cache_key = request.cache_key()
+            query_error = initial_attempt.query_error
+            validation_error = initial_attempt.validation_error
+
             if not self._should_skip_rediscovery_locked(cache_key):
                 self._rediscover_delta_locked()
-                try:
-                    self._prepare_runtime_locked(
-                        reason="resolve:rediscover",
-                        implicit_init=True,
-                        source_sync="auto",
-                        rediscover_modules=False,
-                    )
-                    value = self._evaluate_request_locked(request)
+                retry_attempt = self._attempt_resolve_locked(
+                    request=request,
+                    reason="resolve:rediscover",
+                    rediscover_modules=False,
+                )
+                if retry_attempt.resolved:
                     self._missing_cache.pop(cache_key, None)
-                    return value
-                except QueryMiss as exc:
-                    query_error = exc
-                    self._missing_cache[cache_key] = (
-                        get_settings_registry().version(),
-                        self._module_fingerprint,
-                    )
-                except (KeyError, IndexError, AttributeError) as exc:
-                    query_error = QueryMiss(str(exc))
-                    self._missing_cache[cache_key] = (
-                        get_settings_registry().version(),
-                        self._module_fingerprint,
-                    )
-                except SettingsValidationError as exc:
-                    validation_error = exc
+                    return retry_attempt.value
 
-            if request.has_default:
-                if validation_error is not None:
-                    self._warn_validation_fallback_once_locked(request, validation_error)
-                return resolve_default(request)
+                if retry_attempt.query_error is not None:
+                    query_error = retry_attempt.query_error
+                    self._mark_missing_cache_locked(cache_key)
+                if retry_attempt.validation_error is not None:
+                    validation_error = retry_attempt.validation_error
 
+            return self._finalize_resolve_failure_locked(
+                request=request,
+                query_error=query_error,
+                validation_error=validation_error,
+            )
+
+    def _attempt_resolve_locked(
+        self,
+        *,
+        request: ResolveRequest,
+        reason: str,
+        rediscover_modules: bool,
+    ) -> _ResolveAttempt:
+        try:
+            self._prepare_runtime_locked(
+                reason=reason,
+                implicit_init=True,
+                source_sync="auto",
+                rediscover_modules=rediscover_modules,
+            )
+            value = self._evaluate_request_locked(request)
+            return _ResolveAttempt(resolved=True, value=value)
+        except QueryMiss as exc:
+            return _ResolveAttempt(resolved=False, query_error=exc)
+        except (KeyError, IndexError, AttributeError) as exc:
+            return _ResolveAttempt(resolved=False, query_error=QueryMiss(str(exc)))
+        except SettingsValidationError as exc:
+            return _ResolveAttempt(resolved=False, validation_error=exc)
+
+    def _mark_missing_cache_locked(self, cache_key: str) -> None:
+        self._missing_cache[cache_key] = (
+            get_settings_registry().version(),
+            self._module_fingerprint,
+        )
+
+    def _finalize_resolve_failure_locked(
+        self,
+        *,
+        request: ResolveRequest,
+        query_error: QueryMiss | None,
+        validation_error: SettingsValidationError | None,
+    ) -> Any:
+        if request.has_default:
             if validation_error is not None:
-                raise validation_error
-            if query_error is not None:
-                raise SettingsResolveError(str(query_error)) from query_error
-            raise SettingsResolveError("settings value could not be resolved")
+                self._warn_validation_fallback_once_locked(request, validation_error)
+            return resolve_default(request)
+
+        if validation_error is not None:
+            raise validation_error
+        if query_error is not None:
+            raise SettingsResolveError(str(query_error)) from query_error
+        raise SettingsResolveError("settings value could not be resolved")
 
     def _evaluate_request_locked(self, request: ResolveRequest) -> Any:
-        assert self._settings is not None
-        assert self._source is not None
+        settings = self._active_settings_locked()
+        source = self._active_source_locked()
 
         return evaluate_request(
             request=request,
-            settings=self._settings,
+            settings=settings,
             sections=get_settings_registry().sections(),
-            case_sensitive=self._source.case_sensitive,
+            case_sensitive=source.case_sensitive,
         )
 
     def _should_skip_rediscovery_locked(self, cache_key: str) -> bool:
@@ -317,8 +357,8 @@ class SettingsManager:
         request: ResolveRequest,
         error: SettingsValidationError,
     ) -> None:
-        assert self._source is not None
-        warning_key = f"{self._source.settings_path}|{request.cache_key()}|{error.__class__.__name__}|{str(error)}"
+        source = self._active_source_locked()
+        warning_key = f"{source.settings_path}|{request.cache_key()}|{error.__class__.__name__}|{str(error)}"
         if warning_key in self._validation_fallback_warnings:
             return
 
@@ -345,42 +385,79 @@ class SettingsManager:
         self._reload_live_sources_locked()
         logger.info("settings initialized implicitly source=%s", self._source)
 
-    def _converge_controls_locked(self) -> bool:
-        assert self._source is not None
-        assert self._live_config is not None
+    def _active_source_locked(self) -> SettingsSource:
+        source = self._source
+        if source is None:
+            raise RuntimeError("settings source is not initialized")
+        return source
 
+    def _active_live_config_locked(self) -> LiveConfigStore:
+        live_config = self._live_config
+        if live_config is None:
+            raise RuntimeError("live config store is not initialized")
+        return live_config
+
+    def _active_settings_locked(self) -> BaseModel:
+        settings = self._settings
+        if settings is None:
+            raise RuntimeError("settings snapshot is not initialized")
+        return settings
+
+    def _active_schema_locked(self) -> BuiltSchema:
+        schema = self._schema
+        if schema is None:
+            raise RuntimeError("settings schema is not initialized")
+        return schema
+
+    def _converge_controls_locked(self) -> bool:
+        source = self._active_source_locked()
+        self._active_live_config_locked()
         changed = False
-        visited_paths: set[Path] = {self._source.settings_path}
+        visited_paths: set[Path] = {source.settings_path}
 
         while True:
             control_snapshot = self._materialize_control_snapshot_locked()
             next_source = self._build_source_from_controls_locked(control_snapshot)
+            step_changed, should_continue = self._apply_control_source_step_locked(
+                next_source=next_source,
+                visited_paths=visited_paths,
+            )
+            changed = changed or step_changed
+            if not should_continue:
+                return changed
 
-            if next_source.settings_path != self._source.settings_path:
-                if next_source.settings_path in visited_paths:
-                    logger.warning("settings path control cycle detected; keeping path=%s", self._source.settings_path)
-                    stabilized = replace(next_source, settings_path=self._source.settings_path)
-                    changed = changed or (stabilized != self._source)
-                    self._source = stabilized
-                    return changed
+    def _apply_control_source_step_locked(
+        self,
+        *,
+        next_source: SettingsSource,
+        visited_paths: set[Path],
+    ) -> tuple[bool, bool]:
+        current_source = self._active_source_locked()
 
-                visited_paths.add(next_source.settings_path)
-                changed = True
-                self._source = next_source
-                self._sync_selected_sources_locked(
-                    force=True,
-                    selector=lambda spec: spec.sync_on_path_switch,
-                )
-                continue
+        if next_source.settings_path != current_source.settings_path:
+            if next_source.settings_path in visited_paths:
+                logger.warning("settings path control cycle detected; keeping path=%s", current_source.settings_path)
+                stabilized = replace(next_source, settings_path=current_source.settings_path)
+                changed = stabilized != current_source
+                self._source = stabilized
+                return changed, False
 
-            if next_source != self._source:
-                changed = True
-                self._source = next_source
-            return changed
+            visited_paths.add(next_source.settings_path)
+            self._source = next_source
+            self._sync_selected_sources_locked(
+                force=True,
+                selector=lambda spec: spec.sync_on_path_switch,
+            )
+            return True, True
+
+        if next_source != current_source:
+            self._source = next_source
+            return True, False
+
+        return False, False
 
     def _maybe_auto_reload_locked(self) -> bool:
-        assert self._source is not None
-        mode = self._source.reload_mode
+        mode = self._active_source_locked().reload_mode
         if mode == "off":
             return False
 
@@ -391,7 +468,7 @@ class SettingsManager:
         return self._sync_reload_sources_locked(force=False)
 
     def _reload_live_sources_locked(self) -> bool:
-        assert self._source is not None
+        self._active_source_locked()
 
         source_payloads: dict[SourceName, dict[str, Any]] = {}
         source_states: dict[SourceName, _SOURCE_STATE] = {}
@@ -403,19 +480,17 @@ class SettingsManager:
         if self._live_config is None:
             self._live_config = LiveConfigStore()
 
-        changed = self._live_config.reset(source_payloads)
+        changed = self._active_live_config_locked().reset(source_payloads)
         self._source_states = source_states
         return changed
 
     def _sync_reload_sources_locked(self, *, force: bool) -> bool:
-        assert self._source is not None
-        assert self._live_config is not None
-
-        changed = self._sync_selected_sources_locked(
+        self._active_source_locked()
+        self._active_live_config_locked()
+        return self._sync_selected_sources_locked(
             force=force,
             selector=lambda spec: spec.sync_on_reload,
         )
-        return changed
 
     def _sync_selected_sources_locked(
         self,
@@ -434,15 +509,14 @@ class SettingsManager:
         return changed
 
     def _sync_source_locked(self, source: SourceName, *, force: bool) -> bool:
-        assert self._live_config is not None
-
+        live_config = self._active_live_config_locked()
         payload, state = self._read_source_snapshot_locked(source)
         if not force and state is not None:
             previous_state = self._source_states.get(source)
             if previous_state == state:
                 return False
 
-        changed = self._live_config.replace_source(source, payload)
+        changed = live_config.replace_source(source, payload)
         self._source_states[source] = state
         return changed
 
@@ -456,13 +530,11 @@ class SettingsManager:
         return spec.read_snapshot()
 
     def _read_yaml_snapshot_locked(self) -> tuple[dict[str, Any], _SOURCE_STATE]:
-        assert self._source is not None
-        path = self._source.settings_path
+        path = self._active_source_locked().settings_path
         return load_yaml_settings(path), file_state(path)
 
     def _read_dotenv_snapshot_locked(self) -> tuple[dict[str, Any], _SOURCE_STATE]:
-        assert self._source is not None
-        start_dir = self._source.settings_path.parent
+        start_dir = self._active_source_locked().settings_path.parent
         mapping = load_dotenv_snapshot_raw(start_dir=start_dir)
         return mapping, file_state(find_dotenv_path(start_dir))
 
@@ -470,84 +542,99 @@ class SettingsManager:
         return load_env_snapshot_raw(), None
 
     def _build_source_from_controls_locked(self, control_snapshot: Mapping[str, Any]) -> SettingsSource:
-        assert self._source is not None
-
         control = read_control_model(control_snapshot)
-        runtime_options = runtime_options_from_snapshot(control_snapshot)
-
-        next_settings_path = normalize_override_path(control.settings_path)
-        if next_settings_path is None:
-            base_dir = normalize_override_path(control.base_dir, as_directory=True)
-            if base_dir is not None:
-                next_settings_path = (base_dir / "settings.yaml").resolve()
-            else:
-                next_settings_path = self._source.settings_path
-
-        return SettingsSource(
-            settings_path=next_settings_path,
-            env_prefix=resolve_env_prefix(control.env_prefix),
-            case_sensitive=runtime_options.case_sensitive,
-            reload_mode=runtime_options.reload_mode,
+        return self._build_settings_source_from_control_locked(
+            control=control,
+            explicit_settings_path=None,
+            explicit_env_prefix=None,
+            fallback_settings_path=self._active_source_locked().settings_path,
         )
 
     def _materialize_control_snapshot_locked(self) -> dict[str, Any]:
-        assert self._live_config is not None
-        return materialize_control_snapshot(self._live_config.entries())
+        return materialize_control_snapshot(self._active_live_config_locked().entries())
 
     def _materialize_effective_snapshot_locked(self) -> dict[str, Any]:
-        assert self._source is not None
-        assert self._live_config is not None
+        source = self._active_source_locked()
+        live_config = self._active_live_config_locked()
         return materialize_effective_snapshot(
-            self._live_config.entries(),
-            env_prefix=self._source.env_prefix,
-            case_sensitive=self._source.case_sensitive,
+            live_config.entries(),
+            env_prefix=source.env_prefix,
+            case_sensitive=source.case_sensitive,
         )
 
     def _maybe_rediscover_modules_locked(self) -> bool:
         current_snapshot = snapshot_imported_modules()
-        current_fingerprint = snapshot_fingerprint(current_snapshot)
-        if current_fingerprint == self._module_fingerprint:
+        if current_snapshot == self._module_snapshot:
             return False
 
         self._rediscover_delta_locked(current_snapshot=current_snapshot)
         return True
 
     def _refresh_runtime_locked(self, *, reason: str, force: bool = False) -> None:
-        assert self._source is not None
-        assert self._live_config is not None
-
-        registry_version = get_settings_registry().version()
-        schema_outdated = self._schema is None or registry_version != self._registry_version
-        live_version = self._live_config.version()
-        live_outdated = live_version != self._snapshot_live_version
-        settings_missing = self._settings is None
-
-        if not force and not schema_outdated and not live_outdated and not settings_missing:
+        source = self._active_source_locked()
+        live_config = self._active_live_config_locked()
+        refresh_plan = self._build_refresh_plan_locked(
+            force=force,
+            live_config=live_config,
+        )
+        if not refresh_plan.should_refresh:
             return
 
-        if schema_outdated:
-            self._schema = build_root_settings_model(get_settings_registry().sections())
-            self._registry_version = registry_version
-        assert self._schema is not None
-
-        raw = self._materialize_effective_snapshot_locked()
-        raw = project_snapshot_for_validation(
-            raw,
-            root_model=self._schema.root_model,
-            case_sensitive=self._source.case_sensitive,
+        schema = self._ensure_schema_locked(refresh_plan=refresh_plan)
+        self._settings = self._validate_effective_snapshot_locked(
+            schema=schema,
+            case_sensitive=source.case_sensitive,
         )
-        try:
-            self._settings = self._schema.root_model.model_validate(raw)
-        except ValidationError as exc:
-            raise SettingsValidationError(str(exc)) from exc
 
         logger.info(
             "settings refreshed reason=%s registry_version=%s live_version=%s",
             reason,
-            registry_version,
-            live_version,
+            refresh_plan.registry_version,
+            refresh_plan.live_version,
         )
-        self._snapshot_live_version = live_version
+        self._snapshot_live_version = refresh_plan.live_version
+
+    def _build_refresh_plan_locked(
+        self,
+        *,
+        force: bool,
+        live_config: LiveConfigStore,
+    ) -> _RefreshPlan:
+        registry_version = get_settings_registry().version()
+        schema_outdated = self._schema is None or registry_version != self._registry_version
+        live_version = live_config.version()
+        live_outdated = live_version != self._snapshot_live_version
+        settings_missing = self._settings is None
+        should_refresh = force or schema_outdated or live_outdated or settings_missing
+        return _RefreshPlan(
+            should_refresh=should_refresh,
+            registry_version=registry_version,
+            live_version=live_version,
+            schema_outdated=schema_outdated,
+        )
+
+    def _ensure_schema_locked(self, *, refresh_plan: _RefreshPlan) -> BuiltSchema:
+        if refresh_plan.schema_outdated:
+            self._schema = build_root_settings_model(get_settings_registry().sections())
+            self._registry_version = refresh_plan.registry_version
+        return self._active_schema_locked()
+
+    def _validate_effective_snapshot_locked(
+        self,
+        *,
+        schema: BuiltSchema,
+        case_sensitive: bool,
+    ) -> BaseModel:
+        raw = self._materialize_effective_snapshot_locked()
+        projected = project_snapshot_for_validation(
+            raw,
+            root_model=schema.root_model,
+            case_sensitive=case_sensitive,
+        )
+        try:
+            return schema.root_model.model_validate(projected)
+        except ValidationError as exc:
+            raise SettingsValidationError(str(exc)) from exc
 
     def _rediscover_delta_locked(
         self,
@@ -606,27 +693,59 @@ class SettingsManager:
     ) -> SettingsSource:
         controls = build_env_controls_snapshot()
         control = read_control_model(controls)
-        arg_settings_path = normalize_override_path(settings_path)
-        env_settings_path = normalize_override_path(control.settings_path)
-        env_base_dir = normalize_override_path(control.base_dir, as_directory=True)
-        if arg_settings_path is not None:
-            resolved_path = arg_settings_path
-        elif env_settings_path is not None:
-            resolved_path = env_settings_path
-        elif env_base_dir is not None:
-            resolved_path = (env_base_dir / "settings.yaml").resolve()
-        else:
-            resolved_path = (Path.cwd().resolve() / "settings.yaml").resolve()
+        return self._build_settings_source_from_control_locked(
+            control=control,
+            explicit_settings_path=normalize_override_path(settings_path),
+            explicit_env_prefix=env_prefix,
+            fallback_settings_path=None,
+        )
 
-        runtime_options = runtime_options_from_snapshot(controls)
-        control_env_prefix = control.env_prefix
-        resolved_env_prefix = resolve_env_prefix(env_prefix if env_prefix is not None else control_env_prefix)
+    def _build_settings_source_from_control_locked(
+        self,
+        *,
+        control: ControlModel,
+        explicit_settings_path: Path | None,
+        explicit_env_prefix: str | None,
+        fallback_settings_path: Path | None,
+    ) -> SettingsSource:
+        resolved_path = self._resolve_settings_path_from_control(
+            explicit_settings_path=explicit_settings_path,
+            control_settings_path=control.settings.path,
+            control_base_dir=control.base_dir,
+            fallback_settings_path=fallback_settings_path,
+        )
+        resolved_env_prefix = resolve_env_prefix(
+            explicit_env_prefix if explicit_env_prefix is not None else control.settings.env_prefix
+        )
         return SettingsSource(
             settings_path=resolved_path,
             env_prefix=resolved_env_prefix,
-            case_sensitive=runtime_options.case_sensitive,
-            reload_mode=runtime_options.reload_mode,
+            case_sensitive=control.settings.case_sensitive,
+            reload_mode=control.settings.reload,
         )
+
+    @staticmethod
+    def _resolve_settings_path_from_control(
+        *,
+        explicit_settings_path: Path | None,
+        control_settings_path: str | None,
+        control_base_dir: str | None,
+        fallback_settings_path: Path | None,
+    ) -> Path:
+        if explicit_settings_path is not None:
+            return explicit_settings_path
+
+        from_control = normalize_override_path(control_settings_path)
+        if from_control is not None:
+            return from_control
+
+        from_base_dir = normalize_override_path(control_base_dir, as_directory=True)
+        if from_base_dir is not None:
+            return (from_base_dir / "settings.yaml").resolve()
+
+        if fallback_settings_path is not None:
+            return fallback_settings_path
+        return (Path.cwd().resolve() / "settings.yaml").resolve()
 
 _GLOBAL_MANAGER = SettingsManager()
 

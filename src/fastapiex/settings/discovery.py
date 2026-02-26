@@ -17,12 +17,20 @@ class ModuleDelta:
 
 
 def snapshot_imported_modules() -> dict[str, int]:
-    snapshot: dict[str, int] = {}
-    for name, module in list(sys.modules.items()):
-        if module is None:
-            continue
-        snapshot[name] = id(module)
-    return snapshot
+    try:
+        return {
+            name: id(module)
+            for name, module in sys.modules.items()
+            if module is not None
+        }
+    except RuntimeError:
+        # Fall back to a copied view when sys.modules mutates during iteration.
+        snapshot: dict[str, int] = {}
+        for name, module in list(sys.modules.items()):
+            if module is None:
+                continue
+            snapshot[name] = id(module)
+        return snapshot
 
 
 def diff_module_snapshots(previous: dict[str, int], current: dict[str, int]) -> ModuleDelta:
