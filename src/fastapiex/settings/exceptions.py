@@ -1,11 +1,21 @@
 from __future__ import annotations
 
-from .errors import (
-    SettingsError,
-    SettingsRegistrationError,
-    SettingsResolveError,
-    SettingsValidationError,
-)
+
+class SettingsError(RuntimeError):
+    """Base error for settings domain failures."""
+
+
+class SettingsRegistrationError(SettingsError):
+    """Raised when settings declarations are invalid or conflicting."""
+
+
+class SettingsValidationError(SettingsError):
+    """Raised when loaded raw settings fail schema validation."""
+
+
+class SettingsResolveError(SettingsError):
+    """Raised when a settings read cannot be resolved and no default is provided."""
+
 
 __all__ = [
     "SettingsError",

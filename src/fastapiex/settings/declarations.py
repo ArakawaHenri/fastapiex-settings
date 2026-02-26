@@ -6,7 +6,7 @@ from typing import ClassVar, TypeVar, overload
 
 from pydantic import BaseModel
 
-from .errors import SettingsRegistrationError
+from .exceptions import SettingsRegistrationError
 from .registry import get_settings_registry
 from .section_naming import resolve_section_name
 from .types import SectionKind

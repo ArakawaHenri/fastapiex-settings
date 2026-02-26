@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel
 
 from .control_model import CONTROL_ROOT
-from .errors import SettingsRegistrationError
+from .exceptions import SettingsRegistrationError
 from .section_path import split_dotted_path
 from .types import SectionKind
 
