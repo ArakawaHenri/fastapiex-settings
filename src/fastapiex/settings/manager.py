@@ -1,26 +1,21 @@
 from __future__ import annotations
 
 import logging
-import sys
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from types import ModuleType
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from .control_convergence import converge_control_source
 from .control_model import ControlModel, ReloadMode
 from .control_resolver import read_control_model
-from .controls import build_env_controls_snapshot, file_state, normalize_override_path, snapshot_fingerprint
-from .discovery import (
-    diff_module_snapshots,
-    discover_module_declarations,
-    snapshot_imported_modules,
-)
+from .controls import build_env_controls_snapshot, file_state, normalize_override_path
+from .discovery import snapshot_imported_modules
 from .exceptions import SettingsResolveError, SettingsValidationError
-from .live_config import LiveConfigStore, SourceName, source_order
+from .live_config import LiveConfigStore, SourceName
 from .loader import (
     find_dotenv_path,
     load_dotenv_snapshot_raw,
@@ -28,26 +23,17 @@ from .loader import (
     load_yaml_settings,
     resolve_env_prefix,
 )
+from .module_rediscovery import ModuleRediscovery
 from .query_engine import QueryMiss, ResolveRequest, evaluate_request, resolve_default
 from .raw_projection import materialize_control_snapshot, materialize_effective_snapshot
 from .registry import get_settings_registry
 from .schema_builder import BuiltSchema, build_root_settings_model
 from .snapshot_projection import project_snapshot_for_validation
+from .source_sync import SnapshotReader, SourceState, SourceSyncCoordinator, SourceSyncMode
 
 logger = logging.getLogger(__name__)
 
 _NO_DEFAULT = object()
-
-SourceSyncMode = Literal["none", "auto", "reload", "full"]
-_SOURCE_STATE = tuple[str, bool, int, int] | None
-_SNAPSHOT_READER = Callable[[], tuple[dict[str, Any], _SOURCE_STATE]]
-
-
-@dataclass(frozen=True)
-class _SourceSyncSpec:
-    read_snapshot: _SNAPSHOT_READER
-    sync_on_reload: bool
-    sync_on_path_switch: bool
 
 
 @dataclass(frozen=True)
@@ -83,11 +69,8 @@ class SettingsManager:
         self._snapshot_live_version: int = -1
         self._settings: BaseModel | None = None
         self._lock = threading.RLock()
-        self._source_states: dict[SourceName, _SOURCE_STATE] = {}
-        self._source_sync_specs: dict[SourceName, _SourceSyncSpec] = {}
-
-        self._module_snapshot: dict[str, int] = {}
-        self._module_fingerprint: int = 0
+        self._source_sync = SourceSyncCoordinator()
+        self._module_rediscovery = ModuleRediscovery()
         self._missing_cache: dict[str, tuple[int, int]] = {}
         self._validation_fallback_warnings: set[str] = set()
 
@@ -107,31 +90,16 @@ class SettingsManager:
         self,
         source: SourceName,
         *,
-        read_snapshot: _SNAPSHOT_READER | None = None,
+        read_snapshot: SnapshotReader | None = None,
         sync_on_reload: bool | None = None,
         sync_on_path_switch: bool | None = None,
     ) -> None:
         with self._lock:
-            if source not in source_order():
-                allowed = ", ".join(source_order())
-                raise ValueError(f"unknown source '{source}'; expected one of: {allowed}")
-
-            current = self._source_sync_specs.get(source)
-            if read_snapshot is None:
-                if current is None:
-                    raise ValueError(f"source '{source}' is not registered; read_snapshot is required")
-                resolved_reader = current.read_snapshot
-            else:
-                resolved_reader = read_snapshot
-
-            resolved_reload = current.sync_on_reload if (current and sync_on_reload is None) else bool(sync_on_reload)
-            resolved_path_switch = (
-                current.sync_on_path_switch if (current and sync_on_path_switch is None) else bool(sync_on_path_switch)
-            )
-            self._source_sync_specs[source] = _SourceSyncSpec(
-                read_snapshot=resolved_reader,
-                sync_on_reload=resolved_reload,
-                sync_on_path_switch=resolved_path_switch,
+            self._source_sync.register(
+                source,
+                read_snapshot=read_snapshot,
+                sync_on_reload=sync_on_reload,
+                sync_on_path_switch=sync_on_path_switch,
             )
 
     def init(
@@ -242,13 +210,15 @@ class SettingsManager:
         )
 
     def _sync_sources_for_mode_locked(self, *, mode: SourceSyncMode) -> bool:
-        if mode == "none":
-            return False
-        if mode == "auto":
-            return self._maybe_auto_reload_locked()
-        if mode == "reload":
-            return self._sync_reload_sources_locked(force=True)
-        return self._reload_live_sources_locked()
+        source = self._active_source_locked()
+        live_config, changed = self._source_sync.sync_for_mode(
+            mode=mode,
+            reload_mode=source.reload_mode,
+            live_config=self._live_config,
+        )
+        if live_config is not None:
+            self._live_config = live_config
+        return changed
 
     def _resolve_request(self, request: ResolveRequest) -> Any:
         with self._lock:
@@ -382,7 +352,7 @@ class SettingsManager:
             env_prefix=None,
         )
         self._set_module_snapshot_locked(snapshot_imported_modules())
-        self._reload_live_sources_locked()
+        self._live_config, _ = self._source_sync.reload_all(live_config=self._live_config)
         logger.info("settings initialized implicitly source=%s", self._source)
 
     def _active_source_locked(self) -> SettingsSource:
@@ -412,133 +382,33 @@ class SettingsManager:
     def _converge_controls_locked(self) -> bool:
         source = self._active_source_locked()
         self._active_live_config_locked()
-        changed = False
-        visited_paths: set[Path] = {source.settings_path}
 
-        while True:
-            control_snapshot = self._materialize_control_snapshot_locked()
-            next_source = self._build_source_from_controls_locked(control_snapshot)
-            step_changed, should_continue = self._apply_control_source_step_locked(
-                next_source=next_source,
-                visited_paths=visited_paths,
-            )
-            changed = changed or step_changed
-            if not should_continue:
-                return changed
-
-    def _apply_control_source_step_locked(
-        self,
-        *,
-        next_source: SettingsSource,
-        visited_paths: set[Path],
-    ) -> tuple[bool, bool]:
-        current_source = self._active_source_locked()
-
-        if next_source.settings_path != current_source.settings_path:
-            if next_source.settings_path in visited_paths:
-                logger.warning("settings path control cycle detected; keeping path=%s", current_source.settings_path)
-                stabilized = replace(next_source, settings_path=current_source.settings_path)
-                changed = stabilized != current_source
-                self._source = stabilized
-                return changed, False
-
-            visited_paths.add(next_source.settings_path)
-            self._source = next_source
-            self._sync_selected_sources_locked(
-                force=True,
-                selector=lambda spec: spec.sync_on_path_switch,
-            )
-            return True, True
-
-        if next_source != current_source:
-            self._source = next_source
-            return True, False
-
-        return False, False
-
-    def _maybe_auto_reload_locked(self) -> bool:
-        mode = self._active_source_locked().reload_mode
-        if mode == "off":
-            return False
-
-        if mode == "always":
-            self._sync_reload_sources_locked(force=True)
-            return True
-
-        return self._sync_reload_sources_locked(force=False)
-
-    def _reload_live_sources_locked(self) -> bool:
-        self._active_source_locked()
-
-        source_payloads: dict[SourceName, dict[str, Any]] = {}
-        source_states: dict[SourceName, _SOURCE_STATE] = {}
-        for source in source_order():
-            payload, state = self._read_source_snapshot_locked(source)
-            source_payloads[source] = payload
-            source_states[source] = state
-
-        if self._live_config is None:
-            self._live_config = LiveConfigStore()
-
-        changed = self._active_live_config_locked().reset(source_payloads)
-        self._source_states = source_states
-        return changed
-
-    def _sync_reload_sources_locked(self, *, force: bool) -> bool:
-        self._active_source_locked()
-        self._active_live_config_locked()
-        return self._sync_selected_sources_locked(
-            force=force,
-            selector=lambda spec: spec.sync_on_reload,
+        converged_source, changed = converge_control_source(
+            initial_source=source,
+            materialize_control_snapshot=self._materialize_control_snapshot_locked,
+            build_source_from_controls=self._build_source_from_controls_locked,
+            on_path_switch=self._apply_path_switch_source_locked,
+            stabilize_path=lambda next_source, stable_path: replace(next_source, settings_path=stable_path),
+            logger=logger,
         )
-
-    def _sync_selected_sources_locked(
-        self,
-        *,
-        force: bool,
-        selector: Callable[[_SourceSyncSpec], bool],
-    ) -> bool:
-        changed = False
-        for source in source_order():
-            spec = self._source_sync_specs.get(source)
-            if spec is None:
-                continue
-            if not selector(spec):
-                continue
-            changed = self._sync_source_locked(source, force=force) or changed
+        self._source = converged_source
         return changed
 
-    def _sync_source_locked(self, source: SourceName, *, force: bool) -> bool:
+    def _apply_path_switch_source_locked(self, source: SettingsSource) -> None:
+        self._source = source
         live_config = self._active_live_config_locked()
-        payload, state = self._read_source_snapshot_locked(source)
-        if not force and state is not None:
-            previous_state = self._source_states.get(source)
-            if previous_state == state:
-                return False
+        self._source_sync.sync_path_switch(live_config=live_config)
 
-        changed = live_config.replace_source(source, payload)
-        self._source_states[source] = state
-        return changed
-
-    def _read_source_snapshot_locked(
-        self,
-        source: SourceName,
-    ) -> tuple[dict[str, Any], _SOURCE_STATE]:
-        spec = self._source_sync_specs.get(source)
-        if spec is None:
-            return {}, None
-        return spec.read_snapshot()
-
-    def _read_yaml_snapshot_locked(self) -> tuple[dict[str, Any], _SOURCE_STATE]:
+    def _read_yaml_snapshot_locked(self) -> tuple[dict[str, Any], SourceState]:
         path = self._active_source_locked().settings_path
         return load_yaml_settings(path), file_state(path)
 
-    def _read_dotenv_snapshot_locked(self) -> tuple[dict[str, Any], _SOURCE_STATE]:
+    def _read_dotenv_snapshot_locked(self) -> tuple[dict[str, Any], SourceState]:
         start_dir = self._active_source_locked().settings_path.parent
         mapping = load_dotenv_snapshot_raw(start_dir=start_dir)
         return mapping, file_state(find_dotenv_path(start_dir))
 
-    def _read_env_snapshot_locked(self) -> tuple[dict[str, Any], _SOURCE_STATE]:
+    def _read_env_snapshot_locked(self) -> tuple[dict[str, Any], SourceState]:
         return load_env_snapshot_raw(), None
 
     def _build_source_from_controls_locked(self, control_snapshot: Mapping[str, Any]) -> SettingsSource:
@@ -641,49 +511,21 @@ class SettingsManager:
         *,
         current_snapshot: dict[str, int] | None = None,
     ) -> bool:
-        registry = get_settings_registry()
-        before_version = registry.version()
-
-        if current_snapshot is None:
-            current_snapshot = snapshot_imported_modules()
-        if not self._module_snapshot:
-            self._set_module_snapshot_locked(current_snapshot)
-            return False
-        previous_snapshot = self._module_snapshot
-
-        delta = diff_module_snapshots(previous_snapshot, current_snapshot)
-
-        for module_name in delta.removed:
-            registry.unregister_owner(module_name)
-
-        for module_name in delta.changed:
-            old_identity = previous_snapshot.get(module_name)
-            registry.unregister_owner(module_name, owner_identity=old_identity)
-
-        for module_name in (*delta.added, *delta.changed):
-            module = sys.modules.get(module_name)
-            if not isinstance(module, ModuleType):
-                continue
-            declarations = discover_module_declarations(module_name=module_name, module=module)
-            for raw_path, model, kind, owner_module, owner_identity in declarations:
-                registry.register_section(
-                    raw_path=raw_path,
-                    cls=model,
-                    kind=kind,
-                    owner_module=owner_module,
-                    owner_identity=owner_identity,
-                )
-
-        self._set_module_snapshot_locked(current_snapshot)
-
-        changed = registry.version() != before_version
+        changed = self._module_rediscovery.rediscover_delta(current_snapshot=current_snapshot)
         if changed:
             self._missing_cache.clear()
         return changed
 
     def _set_module_snapshot_locked(self, snapshot: dict[str, int]) -> None:
-        self._module_snapshot = snapshot
-        self._module_fingerprint = snapshot_fingerprint(snapshot)
+        self._module_rediscovery.set_snapshot(snapshot)
+
+    @property
+    def _module_snapshot(self) -> dict[str, int]:
+        return self._module_rediscovery.snapshot
+
+    @property
+    def _module_fingerprint(self) -> int:
+        return self._module_rediscovery.fingerprint
 
     def _resolve_source(
         self,
@@ -772,7 +614,7 @@ def reload_settings(*, reason: str = "manual") -> BaseModel:
 def register_source_sync(
     source: SourceName,
     *,
-    read_snapshot: _SNAPSHOT_READER | None = None,
+    read_snapshot: SnapshotReader | None = None,
     sync_on_reload: bool | None = None,
     sync_on_path_switch: bool | None = None,
 ) -> None:

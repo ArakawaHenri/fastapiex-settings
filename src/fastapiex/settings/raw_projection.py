@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -9,6 +9,7 @@ from .control_model import CONTROL_ENV_PREFIX, CONTROL_ROOT
 from .env_keypath import key_to_parts
 from .env_value_parser import parse_env_value
 from .live_config import SourceEntry, source_priority
+from .projection_utils import build_snapshot_from_winners
 
 _WinnerMeta = tuple[int, int, Any]
 _ProjectedEntry = tuple[tuple[str, ...], Any]
@@ -83,7 +84,7 @@ def materialize_effective_snapshot(
 
 def _materialize_snapshot(entries: Iterable[SourceEntry], *, policy: _ProjectionPolicy) -> dict[str, Any]:
     winners = _collect_projected_winners(entries, projector=policy.project)
-    return _build_snapshot_from_winners(winners)
+    return build_snapshot_from_winners(winners)
 
 
 def _collect_projected_winners(
@@ -138,25 +139,3 @@ def _parse_env_like_value(value: Any) -> Any:
     if isinstance(value, str):
         return parse_env_value(value)
     return deepcopy(value)
-
-
-def _build_snapshot_from_winners(winners: Mapping[tuple[str, ...], _WinnerMeta]) -> dict[str, Any]:
-    merged: dict[str, Any] = {}
-    ordered = sorted(
-        winners.items(),
-        key=lambda item: (item[1][0], item[1][1], len(item[0]), item[0]),
-    )
-    for path, (_, _, value) in ordered:
-        _set_nested_force(merged, path, deepcopy(value))
-    return merged
-
-
-def _set_nested_force(target: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
-    cursor = target
-    for part in path[:-1]:
-        existing = cursor.get(part)
-        if not isinstance(existing, dict):
-            existing = {}
-            cursor[part] = existing
-        cursor = existing
-    cursor[path[-1]] = value
