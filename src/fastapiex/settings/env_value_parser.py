@@ -4,6 +4,8 @@ import json
 import re
 from typing import Any
 
+from .constants import FALSE_TEXT_VALUES, NULL_TEXT_VALUES, TRUE_TEXT_VALUES
+
 _INT_RE = re.compile(r"^[+-]?\d(?:_?\d)*$")
 _FLOAT_RE = re.compile(
     r"^[+-]?(?:\d(?:_?\d)*)[eE][+-]?\d+$|"
@@ -18,11 +20,11 @@ def parse_env_value(raw: str) -> Any:
 
     value = strip_matching_quotes(stripped)
     lowered = value.lower()
-    if lowered in {"true", "yes", "on"}:
+    if lowered in TRUE_TEXT_VALUES:
         return True
-    if lowered in {"false", "no", "off"}:
+    if lowered in FALSE_TEXT_VALUES:
         return False
-    if lowered in {"null", "none"}:
+    if lowered in NULL_TEXT_VALUES:
         return None
 
     if (value.startswith("{") and value.endswith("}")) or (value.startswith("[") and value.endswith("]")):

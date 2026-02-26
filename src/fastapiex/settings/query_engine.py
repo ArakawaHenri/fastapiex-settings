@@ -2,15 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel
 
-from .exceptions import SettingsResolveError
+from .errors import SettingsResolveError
 from .path_lookup import resolve_lookup_path, section_matches_target_type
 from .registry import SettingsSection
-
-ResolveAPI = Literal["settings", "map"]
+from .types import ResolveAPI
 
 
 @dataclass(frozen=True)

@@ -4,7 +4,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from .constants import SETTINGS_FILENAME
 from .loader import load_env_overrides
+from .types import SourceState
 
 
 def normalize_override_path(raw: str | Path | None, *, as_directory: bool = False) -> Path | None:
@@ -25,7 +27,7 @@ def normalize_override_path(raw: str | Path | None, *, as_directory: bool = Fals
     if path.suffix.lower() in {".yaml", ".yml"}:
         return path.resolve()
 
-    return (path / "settings.yaml").resolve()
+    return (path / SETTINGS_FILENAME).resolve()
 
 
 def build_env_controls_snapshot() -> Mapping[Any, Any]:
@@ -36,7 +38,7 @@ def snapshot_fingerprint(snapshot: dict[str, int]) -> int:
     return hash(frozenset(snapshot.items()))
 
 
-def file_state(path: Path | None) -> tuple[str, bool, int, int]:
+def file_state(path: Path | None) -> SourceState:
     if path is None:
         return ("", False, 0, 0)
     resolved = path.expanduser().resolve()

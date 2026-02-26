@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 from pydantic import BaseModel
 
 from .control_model import CONTROL_ROOT
-from .exceptions import SettingsRegistrationError
+from .errors import SettingsRegistrationError
 from .section_path import split_dotted_path
+from .types import SectionKind
 
-SectionKind = Literal["object", "map"]
 _RESERVED_ROOT = CONTROL_ROOT.upper()
 
 

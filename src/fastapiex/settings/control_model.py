@@ -2,17 +2,25 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Literal, TypeAlias
+from typing import TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .constants import (
+    DEFAULT_CASE_SENSITIVE,
+    DEFAULT_ENV_PREFIX,
+    DEFAULT_RELOAD_MODE,
+    ENV_KEY_SEPARATOR,
+    FALSE_TEXT_VALUES,
+    RELOAD_MODE_ALWAYS_TOKENS,
+    RELOAD_MODE_OFF_TOKENS,
+    RELOAD_MODE_ON_CHANGE_TOKENS,
+    TRUE_TEXT_VALUES,
+)
 from .section_naming import resolve_section_name
 from .section_path import split_dotted_path
+from .types import ReloadMode
 
-DEFAULT_ENV_PREFIX = ""
-DEFAULT_CASE_SENSITIVE = False
-ReloadMode = Literal["off", "on_change", "always"]
-DEFAULT_RELOAD_MODE: ReloadMode = "off"
 logger = logging.getLogger(__name__)
 
 
@@ -32,9 +40,9 @@ def _parse_bool(raw: object | None, *, default: bool = False) -> bool:
         return bool(raw)
 
     value = str(raw).strip().lower()
-    if value in {"1", "true", "yes", "on"}:
+    if value in TRUE_TEXT_VALUES:
         return True
-    if value in {"0", "false", "no", "off"}:
+    if value in FALSE_TEXT_VALUES:
         return False
     return default
 
@@ -59,11 +67,11 @@ def _parse_reload_mode(raw: object | None, *, default: ReloadMode = DEFAULT_RELO
 
     if raw_mode is None:
         return default
-    if raw_mode in {"always"}:
+    if raw_mode in RELOAD_MODE_ALWAYS_TOKENS:
         return "always"
-    if raw_mode in {"on_change", "on-change", "onchange", "true", "1", "yes"}:
+    if raw_mode in RELOAD_MODE_ON_CHANGE_TOKENS:
         return "on_change"
-    if raw_mode in {"off", "false", "0", "no"}:
+    if raw_mode in RELOAD_MODE_OFF_TOKENS:
         return "off"
 
     logger.warning("invalid settings reload mode %r; falling back to %r", raw_mode, default)
@@ -126,5 +134,5 @@ def _resolve_control_root(model: type[BaseModel]) -> str:
 
 
 CONTROL_ROOT = _resolve_control_root(ControlModel)
-CONTROL_ENV_PREFIX = f"{CONTROL_ROOT.upper()}__"
-SETTINGS_ENV_PREFIX_ENV_KEY = f"{CONTROL_ENV_PREFIX}SETTINGS__ENV_PREFIX"
+CONTROL_ENV_PREFIX = f"{CONTROL_ROOT.upper()}{ENV_KEY_SEPARATOR}"
+SETTINGS_ENV_PREFIX_ENV_KEY = f"{CONTROL_ENV_PREFIX}SETTINGS{ENV_KEY_SEPARATOR}ENV_PREFIX"

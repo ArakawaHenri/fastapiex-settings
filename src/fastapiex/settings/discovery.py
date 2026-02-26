@@ -6,7 +6,7 @@ from types import ModuleType
 
 from pydantic import BaseModel
 
-from .registry import SectionKind
+from .types import SectionKind
 
 
 @dataclass(frozen=True)

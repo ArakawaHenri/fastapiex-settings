@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from .constants import ENV_KEY_SEPARATOR
 from .control_model import CONTROL_ENV_PREFIX
 from .key_policy import startswith_prefix
 
@@ -46,7 +47,7 @@ def key_to_parts(env_key: str, *, prefix: str, case_sensitive: bool) -> list[str
     if not key_path:
         return None
 
-    raw_parts = key_path.split("__")
+    raw_parts = key_path.split(ENV_KEY_SEPARATOR)
     if any(not part for part in raw_parts):
         return None
 

@@ -3,18 +3,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
-SourceName = Literal["yaml", "dotenv", "env"]
-
-_SOURCE_PRIORITY: dict[SourceName, int] = {
-    "yaml": 1,
-    "dotenv": 2,
-    "env": 3,
-}
-_SOURCE_ORDER: tuple[SourceName, ...] = tuple(
-    sorted(_SOURCE_PRIORITY.keys(), key=lambda source: _SOURCE_PRIORITY[source])
-)
+from .constants import SOURCE_ORDER, SOURCE_PRIORITY
+from .types import SourceName
 
 
 @dataclass(frozen=True)
@@ -49,7 +41,7 @@ class LiveConfigStore:
     ) -> bool:
         flat_by_source: dict[SourceName, dict[tuple[str, ...], Any]] = {
             source: _flatten_mapping(sources.get(source, {}))
-            for source in _SOURCE_ORDER
+            for source in SOURCE_ORDER
         }
 
         new_slots = _build_seed_slots(flat_by_source)
@@ -102,11 +94,11 @@ class LiveConfigStore:
                         value=deepcopy(value.value),
                     )
                 )
-        rows.sort(key=lambda row: (row.rev, _SOURCE_PRIORITY[row.source], row.path, row.source))
+        rows.sort(key=lambda row: (row.rev, SOURCE_PRIORITY[row.source], row.path, row.source))
         return tuple(rows)
 
     def _validate_update_sources(self, updates: Mapping[SourceName, Mapping[Any, Any]]) -> None:
-        unknown_sources = set(updates) - set(_SOURCE_ORDER)
+        unknown_sources = set(updates) - set(SOURCE_ORDER)
         if not unknown_sources:
             return
         unknown = ", ".join(sorted(str(source) for source in unknown_sources))
@@ -190,7 +182,7 @@ class LiveConfigStore:
         winners: dict[tuple[str, ...], tuple[int, int, Any]] = {}
         for path, slot in self._slots.items():
             source, value = _pick_winner(slot)
-            winners[path] = (value.rev, _SOURCE_PRIORITY[source], value.value)
+            winners[path] = (value.rev, SOURCE_PRIORITY[source], value.value)
         return winners
 
     def _current_source_values(self, source: SourceName) -> dict[tuple[str, ...], _SourceValue]:
@@ -217,7 +209,7 @@ def _pick_winner(slot: Mapping[SourceName, _SourceValue]) -> tuple[SourceName, _
     winner_meta: tuple[int, int] | None = None
 
     for source, value in slot.items():
-        meta = (value.rev, _SOURCE_PRIORITY[source])
+        meta = (value.rev, SOURCE_PRIORITY[source])
         if winner_meta is None or meta > winner_meta:
             winner_meta = meta
             winner_source = source
@@ -254,8 +246,8 @@ def _build_seed_slots(
     flat_by_source: Mapping[SourceName, Mapping[tuple[str, ...], Any]],
 ) -> dict[tuple[str, ...], dict[SourceName, _SourceValue]]:
     slots: dict[tuple[str, ...], dict[SourceName, _SourceValue]] = {}
-    for source in _SOURCE_ORDER:
-        source_rev = _SOURCE_PRIORITY[source]
+    for source in SOURCE_ORDER:
+        source_rev = SOURCE_PRIORITY[source]
         flat = flat_by_source[source]
         for path, value in flat.items():
             slot = slots.setdefault(path, {})
@@ -265,7 +257,7 @@ def _build_seed_slots(
 
 def _sort_sources(sources: list[SourceName]) -> list[SourceName]:
     ordered_set = set(sources)
-    return [source for source in _SOURCE_ORDER if source in ordered_set]
+    return [source for source in SOURCE_ORDER if source in ordered_set]
 
 
 def _build_materialized_snapshot(winners: Mapping[tuple[str, ...], tuple[int, int, Any]]) -> dict[str, Any]:
@@ -291,8 +283,8 @@ def _set_nested_force(target: dict[str, Any], path: tuple[str, ...], value: Any)
 
 
 def source_order() -> tuple[SourceName, ...]:
-    return _SOURCE_ORDER
+    return SOURCE_ORDER
 
 
 def source_priority(source: SourceName) -> int:
-    return _SOURCE_PRIORITY[source]
+    return SOURCE_PRIORITY[source]

@@ -6,9 +6,10 @@ from typing import ClassVar, TypeVar, overload
 
 from pydantic import BaseModel
 
-from .exceptions import SettingsRegistrationError
-from .registry import SectionKind, get_settings_registry
+from .errors import SettingsRegistrationError
+from .registry import get_settings_registry
 from .section_naming import resolve_section_name
+from .types import SectionKind
 
 _ModelClassT = TypeVar("_ModelClassT", bound=type[BaseModel])
 

@@ -9,13 +9,14 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from .constants import SETTINGS_FILENAME
 from .control_convergence import converge_control_source
-from .control_model import ControlModel, ReloadMode
+from .control_model import ControlModel
 from .control_resolver import read_control_model
 from .controls import build_env_controls_snapshot, file_state, normalize_override_path
 from .discovery import snapshot_imported_modules
-from .exceptions import SettingsResolveError, SettingsValidationError
-from .live_config import LiveConfigStore, SourceName
+from .errors import SettingsResolveError, SettingsValidationError
+from .live_config import LiveConfigStore
 from .loader import (
     find_dotenv_path,
     load_dotenv_snapshot_raw,
@@ -29,7 +30,8 @@ from .raw_projection import materialize_control_snapshot, materialize_effective_
 from .registry import get_settings_registry
 from .schema_builder import BuiltSchema, build_root_settings_model
 from .snapshot_projection import project_snapshot_for_validation
-from .source_sync import SnapshotReader, SourceState, SourceSyncCoordinator, SourceSyncMode
+from .source_sync import SnapshotReader, SourceSyncCoordinator
+from .types import ReloadMode, SourceName, SourceState, SourceSyncMode
 
 logger = logging.getLogger(__name__)
 
@@ -583,11 +585,11 @@ class SettingsManager:
 
         from_base_dir = normalize_override_path(control_base_dir, as_directory=True)
         if from_base_dir is not None:
-            return (from_base_dir / "settings.yaml").resolve()
+            return (from_base_dir / SETTINGS_FILENAME).resolve()
 
         if fallback_settings_path is not None:
             return fallback_settings_path
-        return (Path.cwd().resolve() / "settings.yaml").resolve()
+        return (Path.cwd().resolve() / SETTINGS_FILENAME).resolve()
 
 _GLOBAL_MANAGER = SettingsManager()
 

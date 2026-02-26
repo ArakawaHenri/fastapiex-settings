@@ -2,13 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
-from .control_model import ReloadMode
-from .live_config import LiveConfigStore, SourceName, source_order
+from .live_config import LiveConfigStore, source_order
+from .types import ReloadMode, SourceName, SourceState, SourceSyncMode
 
-SourceSyncMode = Literal["none", "auto", "reload", "full"]
-SourceState = tuple[str, bool, int, int] | None
 SnapshotReader = Callable[[], tuple[dict[str, Any], SourceState]]
 
 
