@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from .errors import SettingsResolveError
+from .exceptions import SettingsResolveError
 from .path_lookup import resolve_lookup_path, section_matches_target_type
 from .registry import SettingsSection
 from .types import ResolveAPI

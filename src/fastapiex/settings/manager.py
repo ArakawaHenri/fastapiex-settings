@@ -15,7 +15,7 @@ from .control_model import ControlModel
 from .control_resolver import read_control_model
 from .controls import build_env_controls_snapshot, file_state, normalize_override_path
 from .discovery import snapshot_imported_modules
-from .errors import SettingsResolveError, SettingsValidationError
+from .exceptions import SettingsResolveError, SettingsValidationError
 from .live_config import LiveConfigStore
 from .loader import (
     find_dotenv_path,

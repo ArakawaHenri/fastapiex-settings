@@ -5,7 +5,7 @@ from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
-from .errors import SettingsRegistrationError
+from .exceptions import SettingsRegistrationError
 from .registry import SettingsSection
 
 

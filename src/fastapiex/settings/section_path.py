@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from .errors import SettingsRegistrationError
+from .exceptions import SettingsRegistrationError
 
 
 def to_snake_case(name: str) -> str:
