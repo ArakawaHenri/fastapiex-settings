@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import sys
+
+import pytest
+
 from fastapiex.settings.live_config import LiveConfigStore
 
 
@@ -64,3 +68,44 @@ def test_replace_source_without_effect_returns_false() -> None:
     )
 
     assert store.replace_source("yaml", {"app": {"name": "yaml-v1"}}) is False
+
+
+def test_reset_rejects_cyclic_mapping() -> None:
+    cyclic: dict[str, object] = {}
+    cyclic["self"] = cyclic
+
+    store = LiveConfigStore()
+
+    with pytest.raises(ValueError, match="cyclic mapping detected"):
+        store.reset(
+            {
+                "yaml": cyclic,
+                "dotenv": {},
+                "env": {},
+            }
+        )
+
+
+def test_reset_handles_deeply_nested_mapping_without_recursion() -> None:
+    depth = sys.getrecursionlimit() + 50
+    nested: object = "leaf"
+    for index in range(depth, 0, -1):
+        nested = {f"level_{index}": nested}
+
+    store = LiveConfigStore()
+    changed = store.reset(
+        {
+            "yaml": nested,
+            "dotenv": {},
+            "env": {},
+        }
+    )
+
+    assert changed is True
+
+    cursor: object = store.materialize()
+    for index in range(1, depth + 1):
+        assert isinstance(cursor, dict)
+        cursor = cursor[f"level_{index}"]
+
+    assert cursor == "leaf"

@@ -4,8 +4,8 @@ from typing import Any
 
 from pydantic import Field
 
-from fastapiex.settings.declarations import BaseSettings
-from fastapiex.settings.snapshot_projection import project_snapshot_for_validation
+from fastapiex.settings.base import BaseSettings
+from fastapiex.settings.projection import project_snapshot_for_validation
 
 
 def test_snapshot_projection_projects_model_fields_case_insensitively() -> None:

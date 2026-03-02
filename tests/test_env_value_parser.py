@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapiex.settings.env_value_parser import parse_dotenv_value, parse_env_value
+from fastapiex.settings.loader import parse_dotenv_value, parse_env_value
 
 
 def test_parse_env_value_parses_scalars() -> None:

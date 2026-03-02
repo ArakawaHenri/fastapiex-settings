@@ -4,16 +4,17 @@ from typing import Any
 
 import pytest
 
-from fastapiex.settings.declarations import BaseSettings
+from fastapiex.settings.base import BaseSettings
 from fastapiex.settings.exceptions import SettingsResolveError
-from fastapiex.settings.query_engine import (
+from fastapiex.settings.query import (
     QueryMiss,
     ResolveRequest,
     evaluate_request,
     resolve_default,
     resolve_type_target,
 )
-from fastapiex.settings.registry import SectionKind, SettingsSection
+from fastapiex.settings.specs import SectionSpec
+from fastapiex.settings.types import SectionKind
 
 
 def _section(
@@ -21,14 +22,12 @@ def _section(
     path: tuple[str, ...],
     model: type[BaseSettings],
     kind: SectionKind,
-) -> SettingsSection:
-    return SettingsSection(
-        raw_path=".".join(path),
-        path=path,
+) -> SectionSpec:
+    return SectionSpec(
         model=model,
         kind=kind,
-        owner_module=__name__,
-        owner_identity=1,
+        raw_path=".".join(path),
+        path=path,
     )
 
 
