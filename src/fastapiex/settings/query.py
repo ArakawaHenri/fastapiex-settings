@@ -6,9 +6,9 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from .control_contract import is_control_root
 from .exceptions import SettingsResolveError
-from .path_lookup import resolve_lookup_path, section_matches_target_type
-from .registry import SettingsSection
+from .specs import SectionSpec
 from .types import ResolveAPI
 
 
@@ -39,7 +39,7 @@ def evaluate_request(
     *,
     request: ResolveRequest,
     settings: BaseModel,
-    sections: list[SettingsSection],
+    sections: list[SectionSpec],
     case_sensitive: bool,
 ) -> Any:
     value = resolve_target_value(
@@ -65,7 +65,7 @@ def resolve_target_value(
     *,
     target: str | type[object] | None,
     settings: BaseModel,
-    sections: list[SettingsSection],
+    sections: list[SectionSpec],
     case_sensitive: bool,
 ) -> Any:
     if target is None:
@@ -81,15 +81,14 @@ def resolve_target_value(
         raise QueryMiss("target must be a string path or class")
 
     section = resolve_type_target(target_type=target, sections=sections)
-    # Type-target injection should resolve declared sections exactly.
     return resolve_lookup_path(settings, section.path_text, case_sensitive=True)
 
 
 def resolve_type_target(
     *,
     target_type: type[object],
-    sections: list[SettingsSection],
-) -> SettingsSection:
+    sections: list[SectionSpec],
+) -> SectionSpec:
     target_name = f"{target_type.__module__}.{target_type.__qualname__}"
     candidates = [section for section in sections if section_matches_target_type(section, target_type)]
 
@@ -107,3 +106,86 @@ def resolve_default(request: ResolveRequest) -> Any:
     if request.api == "map" and not isinstance(request.default, Mapping):
         raise SettingsResolveError("default value for SettingsMap must be a mapping")
     return request.default
+
+
+def resolve_lookup_path(root: object, path: str, *, case_sensitive: bool) -> Any:
+    segments = _split_lookup_path(path)
+    reserved_namespace = bool(segments) and is_control_root(segments[0])
+    current: Any = root
+    for segment in segments:
+        effective_case_sensitive = case_sensitive and not reserved_namespace
+        if isinstance(current, Mapping):
+            current = _resolve_mapping_value(
+                current,
+                segment,
+                case_sensitive=effective_case_sensitive,
+            )
+            continue
+
+        if isinstance(current, BaseModel):
+            current = _resolve_model_field(
+                current,
+                segment,
+                case_sensitive=effective_case_sensitive,
+            )
+            continue
+
+        raise KeyError(path)
+
+    return current
+
+
+def section_matches_target_type(section: SectionSpec, target_type: type[object]) -> bool:
+    candidate_types: tuple[type[object], ...]
+    if section.kind == "map":
+        candidate_types = (section.model, dict)
+    else:
+        candidate_types = (section.model,)
+    return any(_issubclass_safe(candidate, target_type) for candidate in candidate_types)
+
+def _split_lookup_path(path: str) -> tuple[str, ...]:
+    parts = [part.strip() for part in path.split(".")]
+    if not parts or any(not part for part in parts):
+        raise KeyError(path)
+    return tuple(parts)
+
+
+def _issubclass_safe(candidate: type[object], base: type[object]) -> bool:
+    try:
+        return issubclass(candidate, base)
+    except TypeError:
+        return False
+
+
+def _resolve_mapping_value(mapping: Mapping[Any, Any], segment: str, *, case_sensitive: bool) -> Any:
+    if case_sensitive:
+        if segment not in mapping:
+            raise KeyError(segment)
+        return mapping[segment]
+
+    folded_segment = segment.casefold()
+    folded_matches: list[Any] = []
+
+    for key in mapping.keys():
+        if isinstance(key, str) and key.casefold() == folded_segment:
+            folded_matches.append(key)
+
+    if len(folded_matches) == 1:
+        return mapping[folded_matches[0]]
+
+    raise KeyError(segment)
+
+
+def _resolve_model_field(model: BaseModel, segment: str, *, case_sensitive: bool) -> Any:
+    fields = model.__class__.model_fields
+
+    if case_sensitive:
+        if segment not in fields:
+            raise KeyError(segment)
+        return getattr(model, segment)
+
+    folded_segment = segment.casefold()
+    matches = [name for name in fields if name.casefold() == folded_segment]
+    if len(matches) != 1:
+        raise KeyError(segment)
+    return getattr(model, matches[0])

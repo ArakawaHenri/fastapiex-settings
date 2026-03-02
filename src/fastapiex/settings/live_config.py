@@ -23,6 +23,13 @@ class SourceEntry:
     value: Any
 
 
+@dataclass
+class _FlattenFrame:
+    prefix: tuple[str, ...]
+    mapping: Mapping[Any, Any]
+    items: Any
+
+
 class LiveConfigStore:
     """Source-aware raw configuration state using LWW + source-priority tie-break."""
 
@@ -80,7 +87,7 @@ class LiveConfigStore:
             winners = self._compute_winners()
             self._cached_materialized = _build_materialized_snapshot(winners)
 
-        return deepcopy(self._cached_materialized)
+        return _clone_materialized_snapshot(self._cached_materialized)
 
     def entries(self) -> tuple[SourceEntry, ...]:
         rows: list[SourceEntry] = []
@@ -226,19 +233,40 @@ def _flatten_mapping(
     prefix: tuple[str, ...] = (),
 ) -> dict[tuple[str, ...], Any]:
     flat: dict[tuple[str, ...], Any] = {}
-    for key, value in mapping.items():
-        path = (*prefix, str(key))
-        if isinstance(value, Mapping):
-            if not value:
-                flat[path] = {}
-                continue
-            nested = _flatten_mapping(value, prefix=path)
-            if nested:
-                flat.update(nested)
-            else:
-                flat[path] = {}
+
+    stack: list[_FlattenFrame] = [
+        _FlattenFrame(prefix=prefix, mapping=mapping, items=iter(mapping.items()))
+    ]
+    active_mapping_ids: set[int] = {id(mapping)}
+
+    while stack:
+        frame = stack[-1]
+        try:
+            key, value = next(frame.items)
+        except StopIteration:
+            active_mapping_ids.remove(id(frame.mapping))
+            stack.pop()
             continue
-        flat[path] = value
+
+        path = (*frame.prefix, str(key))
+        if not isinstance(value, Mapping):
+            flat[path] = value
+            continue
+
+        if not value:
+            flat[path] = {}
+            continue
+
+        nested_id = id(value)
+        if nested_id in active_mapping_ids:
+            path_text = ".".join(path)
+            raise ValueError(f"cyclic mapping detected at path '{path_text}'")
+
+        active_mapping_ids.add(nested_id)
+        stack.append(
+            _FlattenFrame(prefix=path, mapping=value, items=iter(value.items()))
+        )
+
     return flat
 
 
@@ -271,6 +299,24 @@ def _build_materialized_snapshot(winners: Mapping[tuple[str, ...], tuple[int, in
     return merged
 
 
+def _clone_materialized_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    clone: dict[str, Any] = {}
+    stack: list[tuple[Mapping[str, Any], dict[str, Any]]] = [(snapshot, clone)]
+
+    while stack:
+        source, target = stack.pop()
+        for key, value in source.items():
+            if isinstance(value, dict):
+                child: dict[str, Any] = {}
+                target[key] = child
+                stack.append((value, child))
+                continue
+
+            target[key] = deepcopy(value)
+
+    return clone
+
+
 def _set_nested_force(target: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
     cursor = target
     for part in path[:-1]:
@@ -280,11 +326,3 @@ def _set_nested_force(target: dict[str, Any], path: tuple[str, ...], value: Any)
             cursor[part] = existing
         cursor = existing
     cursor[path[-1]] = value
-
-
-def source_order() -> tuple[SourceName, ...]:
-    return SOURCE_ORDER
-
-
-def source_priority(source: SourceName) -> int:
-    return SOURCE_PRIORITY[source]

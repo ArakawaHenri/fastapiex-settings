@@ -1,18 +1,33 @@
 from __future__ import annotations
 
+import json
+import logging
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
-from .constants import DEFAULT_ENV_PREFIX, DOTENV_EXPORT_PREFIX, DOTENV_FILENAME
-from .control_model import CONTROL_ENV_PREFIX, SETTINGS_ENV_PREFIX_ENV_KEY
-from .env_keypath import key_to_parts, set_nested_mapping
-from .env_value_parser import parse_dotenv_value, parse_env_value
+from .constants import (
+    DEFAULT_ENV_PREFIX,
+    DOTENV_EXPORT_PREFIX,
+    DOTENV_FILENAME,
+    ENV_KEY_SEPARATOR,
+    FALSE_TEXT_VALUES,
+    NULL_TEXT_VALUES,
+    TRUE_TEXT_VALUES,
+)
+from .control_contract import CONTROL_ENV_PREFIX, SETTINGS_ENV_PREFIX_ENV_KEY
 
+logger = logging.getLogger(__name__)
 _INTERNAL_ENV_RESERVED_PREFIX = CONTROL_ENV_PREFIX
+_INT_RE = re.compile(r"^[+-]?\d(?:_?\d)*$")
+_FLOAT_RE = re.compile(
+    r"^[+-]?(?:\d(?:_?\d)*)[eE][+-]?\d+$|"
+    r"^[+-]?(?:(?:\d(?:_?\d)*)?\.\d(?:_?\d)*|\d(?:_?\d)*\.)(?:[eE][+-]?\d+)?$"
+)
 
 
 def read_env_prefix_override() -> str | None:
@@ -42,7 +57,9 @@ def resolve_env_prefix(prefix: str | None = None) -> str:
         return ""
 
     if value.upper().startswith(_INTERNAL_ENV_RESERVED_PREFIX):
-        raise ValueError("FASTAPIEX__SETTINGS__ENV_PREFIX cannot start with reserved prefix 'FASTAPIEX__'")
+        raise ValueError(
+            f"{SETTINGS_ENV_PREFIX_ENV_KEY} cannot start with reserved prefix '{CONTROL_ENV_PREFIX}'"
+        )
 
     return value
 
@@ -120,3 +137,116 @@ def load_dotenv_overrides(*, start_dir: Path, prefix: str = DEFAULT_ENV_PREFIX, 
         prefix=prefix,
         case_sensitive=case_sensitive,
     )
+
+
+def set_nested_mapping(target: dict[str, Any], parts: list[str], value: Any) -> None:
+    cursor = target
+    for part in parts[:-1]:
+        existing = cursor.get(part)
+        if not isinstance(existing, dict):
+            existing = {}
+            cursor[part] = existing
+        cursor = existing
+    cursor[parts[-1]] = value
+
+
+def key_to_parts(env_key: str, *, prefix: str, case_sensitive: bool) -> list[str] | None:
+    reserved = env_key.upper().startswith(_INTERNAL_ENV_RESERVED_PREFIX)
+
+    if reserved:
+        key_path = env_key
+    elif prefix:
+        if not _startswith_prefix(env_key, prefix, case_sensitive=case_sensitive):
+            return None
+        key_path = env_key[len(prefix):]
+        if key_path.upper().startswith(_INTERNAL_ENV_RESERVED_PREFIX):
+            logger.warning(
+                "ignoring env key '%s': FASTAPIEX__* keys must not carry "
+                "the business prefix '%s'; use '%s' directly",
+                env_key,
+                prefix,
+                key_path,
+            )
+            return None
+    else:
+        key_path = env_key
+
+    if not key_path:
+        return None
+
+    raw_parts = key_path.split(ENV_KEY_SEPARATOR)
+    if any(not part for part in raw_parts):
+        return None
+
+    if reserved or not case_sensitive:
+        return [part.lower() for part in raw_parts]
+    return raw_parts
+
+
+def parse_env_value(raw: str) -> Any:
+    stripped = raw.strip()
+    if stripped == "":
+        return ""
+
+    value = strip_matching_quotes(stripped)
+    lowered = value.lower()
+    if lowered in TRUE_TEXT_VALUES:
+        return True
+    if lowered in FALSE_TEXT_VALUES:
+        return False
+    if lowered in NULL_TEXT_VALUES:
+        return None
+
+    if (value.startswith("{") and value.endswith("}")) or (value.startswith("[") and value.endswith("]")):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+
+    try:
+        normalized = value.replace("_", "")
+        if _INT_RE.match(value):
+            return int(normalized)
+        if _FLOAT_RE.match(value):
+            return float(normalized)
+    except ValueError:
+        return value
+    return value
+
+
+def parse_dotenv_value(raw: str) -> str:
+    value = strip_inline_comment(raw.strip())
+    return strip_matching_quotes(value)
+
+
+def strip_matching_quotes(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def strip_inline_comment(raw: str) -> str:
+    quote: str | None = None
+    escaped = False
+    for idx, ch in enumerate(raw):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch in {"'", '"'}:
+            if quote is None:
+                quote = ch
+            elif quote == ch:
+                quote = None
+            continue
+        if ch == "#" and quote is None:
+            return raw[:idx].rstrip()
+    return raw.rstrip()
+
+
+def _startswith_prefix(value: str, prefix: str, *, case_sensitive: bool) -> bool:
+    if case_sensitive:
+        return value.startswith(prefix)
+    return value.casefold().startswith(prefix.casefold())

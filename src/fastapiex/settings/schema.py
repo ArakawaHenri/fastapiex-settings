@@ -5,25 +5,26 @@ from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
+from .control_contract import CONTROL_SPEC
 from .exceptions import SettingsRegistrationError
-from .registry import SettingsSection
+from .specs import SectionSpec
 
 
 @dataclass(frozen=True)
 class BuiltSchema:
     root_model: type[BaseModel]
-    sections: tuple[SettingsSection, ...]
+    sections: tuple[SectionSpec, ...]
 
 
 @dataclass
 class _TreeNode:
     name: str
-    decl: SettingsSection | None = None
+    decl: SectionSpec | None = None
     children: dict[str, "_TreeNode"] = field(default_factory=dict)
 
 
 def build_root_settings_model(
-    sections: list[SettingsSection],
+    sections: list[SectionSpec],
     *,
     model_name: str = "FastAPIExRootSettings",
 ) -> BuiltSchema:
@@ -40,9 +41,8 @@ def build_root_settings_model(
         child_model = _build_object_model(child, model_name=f"{model_name}_{child_name}")
         field_defs[child_name] = (child_model, Field(default_factory=child_model))
 
-    # Reserved runtime controls are plain keys and remain readable via GetSettings.
-    if "fastapiex" not in field_defs:
-        field_defs["fastapiex"] = (dict[str, Any], Field(default_factory=dict))
+    if CONTROL_SPEC.root not in field_defs:
+        field_defs[CONTROL_SPEC.root] = (dict[str, Any], Field(default_factory=dict))
 
     root_model = _create_dynamic_model(
         model_name=model_name,
@@ -52,7 +52,7 @@ def build_root_settings_model(
     return BuiltSchema(root_model=root_model, sections=tuple(sorted(sections, key=lambda item: item.path)))
 
 
-def _insert_section(root: _TreeNode, section: SettingsSection) -> None:
+def _insert_section(root: _TreeNode, section: SectionSpec) -> None:
     current = root
     for part in section.path:
         if current.decl is not None and current.decl.kind == "map":

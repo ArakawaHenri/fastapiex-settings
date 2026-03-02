@@ -10,11 +10,14 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from .constants import SETTINGS_FILENAME
-from .control_convergence import converge_control_source
-from .control_model import ControlModel
-from .control_resolver import read_control_model
-from .controls import build_env_controls_snapshot, file_state, normalize_override_path
-from .discovery import snapshot_imported_modules
+from .controls import (
+    ControlModel,
+    build_env_controls_snapshot,
+    converge_control_source,
+    normalize_override_path,
+    read_control_model,
+)
+from .discovery import ModuleRediscovery, snapshot_imported_modules
 from .exceptions import SettingsResolveError, SettingsValidationError
 from .live_config import LiveConfigStore
 from .loader import (
@@ -24,13 +27,15 @@ from .loader import (
     load_yaml_settings,
     resolve_env_prefix,
 )
-from .module_rediscovery import ModuleRediscovery
-from .query_engine import QueryMiss, ResolveRequest, evaluate_request, resolve_default
-from .raw_projection import materialize_control_snapshot, materialize_effective_snapshot
+from .projection import (
+    materialize_control_snapshot,
+    materialize_effective_snapshot,
+    project_snapshot_for_validation,
+)
+from .query import QueryMiss, ResolveRequest, evaluate_request, resolve_default
 from .registry import get_settings_registry
-from .schema_builder import BuiltSchema, build_root_settings_model
-from .snapshot_projection import project_snapshot_for_validation
-from .source_sync import SnapshotReader, SourceSyncCoordinator
+from .schema import BuiltSchema, build_root_settings_model
+from .source_sync import SnapshotReader, SourceSyncCoordinator, file_state
 from .types import ReloadMode, SourceName, SourceState, SourceSyncMode
 
 logger = logging.getLogger(__name__)
@@ -596,21 +601,6 @@ _GLOBAL_MANAGER = SettingsManager()
 
 def get_settings_manager() -> SettingsManager:
     return _GLOBAL_MANAGER
-
-
-def init_settings(
-    *,
-    settings_path: str | Path | None = None,
-    env_prefix: str | None = None,
-) -> BaseModel:
-    return get_settings_manager().init(
-        settings_path=settings_path,
-        env_prefix=env_prefix,
-    )
-
-
-def reload_settings(*, reason: str = "manual") -> BaseModel:
-    return get_settings_manager().reload(reason=reason)
 
 
 def register_source_sync(

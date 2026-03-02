@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from .live_config import LiveConfigStore, source_order
+from .constants import SOURCE_ORDER
+from .live_config import LiveConfigStore
 from .types import ReloadMode, SourceName, SourceState, SourceSyncMode
 
 SnapshotReader = Callable[[], tuple[dict[str, Any], SourceState]]
@@ -30,8 +32,8 @@ class SourceSyncCoordinator:
         sync_on_reload: bool | None = None,
         sync_on_path_switch: bool | None = None,
     ) -> None:
-        if source not in source_order():
-            allowed = ", ".join(source_order())
+        if source not in SOURCE_ORDER:
+            allowed = ", ".join(SOURCE_ORDER)
             raise ValueError(f"unknown source '{source}'; expected one of: {allowed}")
 
         current = self._source_sync_specs.get(source)
@@ -78,7 +80,7 @@ class SourceSyncCoordinator:
         source_payloads: dict[SourceName, dict[str, Any]] = {}
         source_states: dict[SourceName, SourceState] = {}
 
-        for source in source_order():
+        for source in SOURCE_ORDER:
             payload, state = self._read_source_snapshot(source)
             source_payloads[source] = payload
             source_states[source] = state
@@ -110,7 +112,7 @@ class SourceSyncCoordinator:
         selector: Callable[[SourceSyncSpec], bool],
     ) -> bool:
         changed = False
-        for source in source_order():
+        for source in SOURCE_ORDER:
             spec = self._source_sync_specs.get(source)
             if spec is None or not selector(spec):
                 continue
@@ -143,3 +145,14 @@ class SourceSyncCoordinator:
         if spec is None:
             return {}, None
         return spec.read_snapshot()
+
+
+def file_state(path: Path | None) -> SourceState:
+    if path is None:
+        return ("", False, 0, 0)
+    resolved = path.expanduser().resolve()
+    try:
+        stat_result = resolved.stat()
+    except FileNotFoundError:
+        return (str(resolved), False, 0, 0)
+    return (str(resolved), True, stat_result.st_mtime_ns, stat_result.st_size)

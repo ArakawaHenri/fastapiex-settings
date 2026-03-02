@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapiex.settings.env_keypath import key_to_parts, set_nested_mapping
+from fastapiex.settings.loader import key_to_parts, set_nested_mapping
 
 
 def test_key_to_parts_keeps_reserved_namespace_case_insensitive() -> None:

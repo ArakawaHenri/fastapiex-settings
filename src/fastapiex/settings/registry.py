@@ -1,47 +1,44 @@
 from __future__ import annotations
 
+import sys
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TypeVar, overload
 
 from pydantic import BaseModel
 
-from .control_model import CONTROL_ROOT
+from .control_contract import CONTROL_SPEC
 from .exceptions import SettingsRegistrationError
-from .section_path import split_dotted_path
+from .specs import SectionSpec, describe_section
 from .types import SectionKind
 
-_RESERVED_ROOT = CONTROL_ROOT.upper()
+_ModelClassT = TypeVar("_ModelClassT", bound=type[BaseModel])
 
 
-@dataclass(frozen=True)
-class SettingsSection:
-    raw_path: str
-    path: tuple[str, ...]
-    model: type[BaseModel]
-    kind: SectionKind
-    owner_module: str
-    owner_identity: int
-
-    @property
-    def path_text(self) -> str:
-        return ".".join(self.path)
-
-
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _SectionRecord:
-    raw_path: str
-    model: type[BaseModel]
-    kind: SectionKind
+    spec: SectionSpec
     owner_module: str
     owner_identity: int
 
 
-def canonicalize_path(raw_path: str) -> tuple[str, ...]:
-    raw_parts = split_dotted_path(raw_path)
+def build_section_spec(
+    *,
+    model: type[BaseModel],
+    kind: SectionKind,
+    raw_path: str | None = None,
+) -> SectionSpec:
+    try:
+        spec = describe_section(model, kind=kind, explicit=raw_path)
+    except ValueError as exc:
+        raise SettingsRegistrationError(str(exc)) from exc
 
-    if raw_parts[0].casefold() == _RESERVED_ROOT.casefold():
-        raise SettingsRegistrationError(f"section path '{raw_path}' uses reserved prefix '{_RESERVED_ROOT}.*'")
+    if spec.root.casefold() == CONTROL_SPEC.root.casefold():
+        reserved = CONTROL_SPEC.root.upper()
+        raise SettingsRegistrationError(f"section path '{spec.raw_path}' uses reserved prefix '{reserved}.*'")
 
-    return raw_parts
+    return spec
 
 
 class SettingsRegistry:
@@ -49,97 +46,90 @@ class SettingsRegistry:
 
     def __init__(self) -> None:
         self._records_by_model: dict[type[BaseModel], _SectionRecord] = {}
-        self._sections_by_path: dict[tuple[str, ...], SettingsSection] = {}
+        self._sections_by_path: dict[tuple[str, ...], SectionSpec] = {}
         self._version = 0
+        self._lock = threading.RLock()
 
     def register_section(
         self,
         *,
-        raw_path: str,
-        cls: type[object],
-        kind: SectionKind,
+        spec: SectionSpec,
         owner_module: str,
         owner_identity: int,
     ) -> None:
-        if not isinstance(cls, type) or not issubclass(cls, BaseModel):
-            raise SettingsRegistrationError("settings section model must be a BaseModel subclass")
+        with self._lock:
+            kind = spec.kind
+            model = spec.model
+            if not isinstance(model, type) or not issubclass(model, BaseModel):
+                raise SettingsRegistrationError("settings section model must be a BaseModel subclass")
 
-        if kind not in {"object", "map"}:
-            raise SettingsRegistrationError(f"unsupported section kind: {kind!r}")
+            if kind not in {"object", "map"}:
+                raise SettingsRegistrationError(f"unsupported section kind: {kind!r}")
 
-        model = cls
-        previous_records = dict(self._records_by_model)
-        previous_sections = self._sections_by_path
-        previous_version = self._version
+            previous_records = dict(self._records_by_model)
+            previous_sections = self._sections_by_path
+            previous_version = self._version
 
-        try:
-            for existing_model, existing_record in list(self._records_by_model.items()):
-                if existing_record.owner_module != owner_module:
-                    continue
-                if existing_record.owner_identity == owner_identity:
-                    continue
-                del self._records_by_model[existing_model]
+            try:
+                for existing_model, existing_record in list(self._records_by_model.items()):
+                    if existing_record.owner_module != owner_module:
+                        continue
+                    if existing_record.owner_identity == owner_identity:
+                        continue
+                    del self._records_by_model[existing_model]
 
-            existing = self._records_by_model.get(model)
-            candidate = _SectionRecord(
-                raw_path=raw_path,
-                model=model,
-                kind=kind,
-                owner_module=owner_module,
-                owner_identity=owner_identity,
-            )
-            if existing == candidate:
-                return
+                existing = self._records_by_model.get(model)
+                candidate = _SectionRecord(
+                    spec=spec,
+                    owner_module=owner_module,
+                    owner_identity=owner_identity,
+                )
+                if existing == candidate:
+                    return
 
-            self._records_by_model[model] = candidate
-            self._reindex()
-        except SettingsRegistrationError:
-            self._records_by_model = previous_records
-            self._sections_by_path = previous_sections
-            self._version = previous_version
-            raise
+                self._records_by_model[model] = candidate
+                self._reindex_locked()
+            except SettingsRegistrationError:
+                self._records_by_model = previous_records
+                self._sections_by_path = previous_sections
+                self._version = previous_version
+                raise
 
     def unregister_owner(self, owner_module: str, *, owner_identity: int | None = None) -> None:
-        removed = False
-        for model, record in list(self._records_by_model.items()):
-            if record.owner_module != owner_module:
-                continue
-            if owner_identity is not None and record.owner_identity != owner_identity:
-                continue
-            del self._records_by_model[model]
-            removed = True
+        with self._lock:
+            removed = False
+            for model, record in list(self._records_by_model.items()):
+                if record.owner_module != owner_module:
+                    continue
+                if owner_identity is not None and record.owner_identity != owner_identity:
+                    continue
+                del self._records_by_model[model]
+                removed = True
 
-        if removed:
-            self._reindex()
+            if removed:
+                self._reindex_locked()
 
-    def sections(self) -> list[SettingsSection]:
-        return [self._sections_by_path[key] for key in sorted(self._sections_by_path)]
+    def sections(self) -> list[SectionSpec]:
+        with self._lock:
+            return [self._sections_by_path[key] for key in sorted(self._sections_by_path)]
 
     def version(self) -> int:
-        return self._version
+        with self._lock:
+            return self._version
 
-    def _reindex(self) -> None:
-        new_sections: dict[tuple[str, ...], SettingsSection] = {}
+    def _reindex_locked(self) -> None:
+        new_sections: dict[tuple[str, ...], SectionSpec] = {}
 
         for record in self._records_by_model.values():
-            path = canonicalize_path(record.raw_path)
-            section = SettingsSection(
-                raw_path=record.raw_path,
-                path=path,
-                model=record.model,
-                kind=record.kind,
-                owner_module=record.owner_module,
-                owner_identity=record.owner_identity,
-            )
-
-            existing = new_sections.get(path)
-            if existing is not None and existing.model is not record.model:
+            section = record.spec
+            existing = new_sections.get(section.path)
+            if existing is not None and existing.model is not section.model:
                 raise SettingsRegistrationError(
-                    f"duplicate section '{'.'.join(path)}' for "
+                    f"duplicate section '{section.path_text}' for "
                     f"{existing.model.__module__}.{existing.model.__qualname__} and "
-                    f"{record.model.__module__}.{record.model.__qualname__}"
+                    f"{section.model.__module__}.{section.model.__qualname__}"
                 )
-            new_sections[path] = section
+            new_sections[section.path] = section
 
         self._sections_by_path = new_sections
         self._version += 1
@@ -150,3 +140,99 @@ _GLOBAL_REGISTRY = SettingsRegistry()
 
 def get_settings_registry() -> SettingsRegistry:
     return _GLOBAL_REGISTRY
+
+
+def _module_identity(module_name: str) -> int:
+    module = sys.modules.get(module_name)
+    if module is None:
+        return -1
+    return id(module)
+
+
+def _register_declared_model(
+    cls: _ModelClassT,
+    *,
+    section: str | None,
+    kind: SectionKind,
+) -> _ModelClassT:
+    if not issubclass(cls, BaseModel):
+        raise SettingsRegistrationError("@Settings declarations require a BaseModel subclass")
+
+    spec = build_section_spec(model=cls, kind=kind, raw_path=section)
+
+    cls.__section__ = spec.raw_path  # type: ignore[attr-defined]
+    cls.__fastapiex_settings_model__ = True  # type: ignore[attr-defined]
+    cls.__fastapiex_settings_is_map__ = kind == "map"  # type: ignore[attr-defined]
+
+    registry = get_settings_registry()
+    registry.register_section(
+        spec=spec,
+        owner_module=cls.__module__,
+        owner_identity=_module_identity(cls.__module__),
+    )
+    return cls
+
+
+def _decorate_settings(section: str | None, *, kind: SectionKind) -> Callable[[_ModelClassT], _ModelClassT]:
+    def _decorator(cls: _ModelClassT) -> _ModelClassT:
+        return _register_declared_model(cls, section=section, kind=kind)
+
+    return _decorator
+
+
+@overload
+def Settings(model: _ModelClassT, /) -> _ModelClassT: ...
+
+
+@overload
+def Settings(path: str | None = None, /) -> Callable[[_ModelClassT], _ModelClassT]: ...
+
+
+def Settings(
+    model_or_path: _ModelClassT | str | None = None,
+    /,
+) -> _ModelClassT | Callable[[_ModelClassT], _ModelClassT]:
+    """Object section declaration decorator."""
+
+    if isinstance(model_or_path, type):
+        if not issubclass(model_or_path, BaseModel):
+            raise TypeError("@Settings can only decorate BaseModel subclasses")
+        return _register_declared_model(model_or_path, section=None, kind="object")
+
+    if model_or_path is not None and not isinstance(model_or_path, str):
+        raise TypeError("@Settings expects a dotted path string, model class, or no argument")
+
+    return _decorate_settings(model_or_path, kind="object")
+
+
+@overload
+def SettingsMap(model: _ModelClassT, /) -> _ModelClassT: ...
+
+
+@overload
+def SettingsMap(path: str | None = None, /) -> Callable[[_ModelClassT], _ModelClassT]: ...
+
+
+def SettingsMap(
+    model_or_path: _ModelClassT | str | None = None,
+    /,
+) -> _ModelClassT | Callable[[_ModelClassT], _ModelClassT]:
+    """Map section declaration decorator."""
+
+    if isinstance(model_or_path, type):
+        if not issubclass(model_or_path, BaseModel):
+            raise TypeError("@SettingsMap can only decorate BaseModel subclasses")
+        return _register_declared_model(model_or_path, section=None, kind="map")
+
+    if model_or_path is not None and not isinstance(model_or_path, str):
+        raise TypeError("@SettingsMap expects a dotted path string, model class, or no argument")
+
+    return _decorate_settings(model_or_path, kind="map")
+
+
+__all__ = [
+    "Settings",
+    "SettingsMap",
+    "SettingsRegistry",
+    "get_settings_registry",
+]

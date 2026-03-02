@@ -4,7 +4,7 @@ import logging
 import os
 from typing import TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import ConfigDict, Field, field_validator
 
 from .constants import (
     DEFAULT_CASE_SENSITIVE,
@@ -17,8 +17,8 @@ from .constants import (
     RELOAD_MODE_ON_CHANGE_TOKENS,
     TRUE_TEXT_VALUES,
 )
-from .section_naming import resolve_section_name
-from .section_path import split_dotted_path
+from .core_settings import CoreSettings
+from .specs import SectionSpec
 from .types import ReloadMode
 
 logger = logging.getLogger(__name__)
@@ -57,14 +57,11 @@ def _parse_case_sensitive_mode(raw: object | None, *, default: bool = DEFAULT_CA
 
 def _parse_reload_mode(raw: object | None, *, default: ReloadMode = DEFAULT_RELOAD_MODE) -> ReloadMode:
     if isinstance(raw, bool):
-        raw_mode = "on_change" if raw else "off"
-    elif isinstance(raw, (int, float)):
-        raw_mode = "on_change" if raw else "off"
-    elif raw is None:
-        raw_mode = None
-    else:
-        raw_mode = str(raw).strip().lower()
+        return "on_change" if raw else "off"
+    if isinstance(raw, (int, float)):
+        return "on_change" if raw else "off"
 
+    raw_mode = None if raw is None else str(raw).strip().lower()
     if raw_mode is None:
         return default
     if raw_mode in RELOAD_MODE_ALWAYS_TOKENS:
@@ -78,8 +75,9 @@ def _parse_reload_mode(raw: object | None, *, default: ReloadMode = DEFAULT_RELO
     return default
 
 
-class _SettingsControlModel(BaseModel):
+class SettingsControls(CoreSettings):
     model_config = ConfigDict(extra="ignore")
+    __section__ = "settings"
 
     path: str | None = None
     env_prefix: str = DEFAULT_ENV_PREFIX
@@ -110,10 +108,10 @@ class _SettingsControlModel(BaseModel):
         return _parse_reload_mode(value)
 
 
-class Fastapiex(BaseModel):
+class Fastapiex(CoreSettings):
     model_config = ConfigDict(extra="ignore")
 
-    settings: _SettingsControlModel = Field(default_factory=_SettingsControlModel)
+    settings: SettingsControls = Field(default_factory=SettingsControls)
     base_dir: str | None = None
 
     @field_validator("base_dir", mode="before")
@@ -124,15 +122,27 @@ class Fastapiex(BaseModel):
 
 ControlModel: TypeAlias = Fastapiex
 
+CONTROL_SPEC: SectionSpec = ControlModel.section_spec()
+CONTROL_ROOT = CONTROL_SPEC.root
+CONTROL_ENV_PREFIX = f"{ControlModel.env_key(separator=ENV_KEY_SEPARATOR)}{ENV_KEY_SEPARATOR}"
+SETTINGS_ENV_PREFIX_ENV_KEY = ControlModel.nested_env_key(
+    SettingsControls,
+    "env_prefix",
+    separator=ENV_KEY_SEPARATOR,
+)
 
-def _resolve_control_root(model: type[BaseModel]) -> str:
-    resolved = resolve_section_name(model, explicit=None)
-    parts = split_dotted_path(resolved)
-    if len(parts) != 1:
-        raise ValueError(f"control root must be a single path segment, got {resolved!r}")
-    return parts[0]
+
+def is_control_root(segment: str) -> bool:
+    return segment.casefold() == CONTROL_ROOT.casefold()
 
 
-CONTROL_ROOT = _resolve_control_root(ControlModel)
-CONTROL_ENV_PREFIX = f"{CONTROL_ROOT.upper()}{ENV_KEY_SEPARATOR}"
-SETTINGS_ENV_PREFIX_ENV_KEY = f"{CONTROL_ENV_PREFIX}SETTINGS{ENV_KEY_SEPARATOR}ENV_PREFIX"
+__all__ = [
+    "CONTROL_ENV_PREFIX",
+    "CONTROL_ROOT",
+    "CONTROL_SPEC",
+    "ControlModel",
+    "Fastapiex",
+    "SETTINGS_ENV_PREFIX_ENV_KEY",
+    "SettingsControls",
+    "is_control_root",
+]
