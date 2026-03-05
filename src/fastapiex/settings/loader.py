@@ -23,6 +23,7 @@ from .control_contract import CONTROL_ENV_PREFIX, SETTINGS_ENV_PREFIX_ENV_KEY
 
 logger = logging.getLogger(__name__)
 _INTERNAL_ENV_RESERVED_PREFIX = CONTROL_ENV_PREFIX
+_ENV_SNAPSHOT_ATTEMPTS = 3
 _INT_RE = re.compile(r"^[+-]?\d(?:_?\d)*$")
 _FLOAT_RE = re.compile(
     r"^[+-]?(?:\d(?:_?\d)*)[eE][+-]?\d+$|"
@@ -30,15 +31,50 @@ _FLOAT_RE = re.compile(
 )
 
 
+def _current_environ() -> Mapping[str, str]:
+    return os.environ
+
+
+def _snapshot_os_environ() -> dict[str, str]:
+    environ = _current_environ()
+
+    for _ in range(_ENV_SNAPSHOT_ATTEMPTS):
+        try:
+            return dict(environ)
+        except (KeyError, RuntimeError):
+            continue
+
+    keys: list[str] | None = None
+    for _ in range(_ENV_SNAPSHOT_ATTEMPTS):
+        try:
+            keys = list(environ)
+            break
+        except (KeyError, RuntimeError):
+            continue
+
+    if keys is None:
+        return {}
+
+    snapshot: dict[str, str] = {}
+    for key in keys:
+        try:
+            snapshot[key] = environ[key]
+        except KeyError:
+            continue
+    return snapshot
+
+
 def read_env_prefix_override() -> str | None:
-    exact = os.getenv(SETTINGS_ENV_PREFIX_ENV_KEY)
+    snapshot = _snapshot_os_environ()
+
+    exact = snapshot.get(SETTINGS_ENV_PREFIX_ENV_KEY)
     if exact is not None:
         stripped = exact.strip()
         if stripped:
             return stripped
 
     target = SETTINGS_ENV_PREFIX_ENV_KEY.upper()
-    for env_key, value in os.environ.items():
+    for env_key, value in snapshot.items():
         if env_key.upper() != target:
             continue
         stripped = value.strip()
@@ -65,10 +101,12 @@ def resolve_env_prefix(prefix: str | None = None) -> str:
 
 
 def load_yaml_settings(path: Path) -> dict[str, Any]:
-    if not path.exists():
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return {}
 
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw = yaml.safe_load(text)
     if raw is None:
         return {}
     if not isinstance(raw, dict):
@@ -77,7 +115,7 @@ def load_yaml_settings(path: Path) -> dict[str, Any]:
 
 
 def load_env_snapshot_raw() -> dict[str, str]:
-    return dict(os.environ)
+    return _snapshot_os_environ()
 
 
 def parse_env_snapshot(
@@ -114,7 +152,12 @@ def load_dotenv_snapshot_raw(*, start_dir: Path) -> dict[str, str]:
         return {}
 
     pairs: dict[str, str] = {}
-    for raw_line in dotenv_path.read_text(encoding="utf-8").splitlines():
+    try:
+        lines = dotenv_path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return {}
+
+    for raw_line in lines:
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue

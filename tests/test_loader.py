@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import pytest
 
+from fastapiex.settings import loader as loader_module
 from fastapiex.settings.live_config import LiveConfigStore
 from fastapiex.settings.loader import (
     load_dotenv_overrides,
+    load_dotenv_snapshot_raw,
+    load_env_snapshot_raw,
     load_env_overrides,
     load_yaml_settings,
+    read_env_prefix_override,
     resolve_env_prefix,
 )
 
@@ -40,6 +45,65 @@ def _materialize_raw(*, path: Path, env_prefix: str, case_sensitive: bool) -> di
     store = LiveConfigStore()
     store.reset({"yaml": yaml_raw, "dotenv": dotenv_raw, "env": env_raw})
     return store.materialize()
+
+
+class _FlakyEnviron(Mapping[str, str]):
+    def __init__(self, data: Mapping[str, str], *, failures: int) -> None:
+        self._data = dict(data)
+        self._failures = failures
+
+    def __getitem__(self, key: str) -> str:
+        if self._failures > 0:
+            self._failures -= 1
+            raise KeyError(key)
+        return self._data[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+
+class _IterFlakyEnviron(Mapping[str, str]):
+    def __init__(self, data: Mapping[str, str], *, iter_failures: int) -> None:
+        self._data = dict(data)
+        self._iter_failures = iter_failures
+
+    def __getitem__(self, key: str) -> str:
+        return self._data[key]
+
+    def __iter__(self) -> Iterator[str]:
+        if self._iter_failures > 0:
+            self._iter_failures -= 1
+            raise RuntimeError("unstable environ iteration")
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+
+class _AlwaysBrokenEnviron(Mapping[str, str]):
+    def __getitem__(self, key: str) -> str:
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        raise RuntimeError("environ unavailable")
+
+    def __len__(self) -> int:
+        return 0
+
+
+class _MissingOnReadPath:
+    def __init__(self, text: str = "") -> None:
+        self._text = text
+
+    def read_text(self, *, encoding: str) -> str:
+        _ = encoding
+        raise FileNotFoundError("disappeared during read")
+
+    def __str__(self) -> str:
+        return "<missing-path>"
 
 
 def test_loader_stack_applies_env_dotenv_yaml_precedence_case_insensitive(
@@ -246,3 +310,46 @@ def test_real_fastapiex_key_wins_when_prefixed_variant_also_exists(
     raw = _materialize_raw(path=settings_file, env_prefix="TEST__", case_sensitive=False)
 
     assert raw["fastapiex"]["settings"]["path"] == "/real.yaml"
+
+
+def test_load_env_snapshot_raw_retries_when_environ_copy_is_unstable(monkeypatch: pytest.MonkeyPatch) -> None:
+    flaky = _FlakyEnviron({"APP__NAME": "demo"}, failures=1)
+    monkeypatch.setattr(loader_module, "_current_environ", lambda: flaky)
+
+    assert load_env_snapshot_raw() == {"APP__NAME": "demo"}
+
+
+def test_load_env_snapshot_raw_falls_back_after_repeated_iteration_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flaky = _IterFlakyEnviron({"APP__NAME": "demo"}, iter_failures=3)
+    monkeypatch.setattr(loader_module, "_current_environ", lambda: flaky)
+
+    assert load_env_snapshot_raw() == {"APP__NAME": "demo"}
+
+
+def test_read_env_prefix_override_uses_stable_snapshot_with_case_insensitive_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flaky = _FlakyEnviron({"fastapiex__settings__env_prefix": " TEST__ "}, failures=1)
+    monkeypatch.setattr(loader_module, "_current_environ", lambda: flaky)
+
+    assert read_env_prefix_override() == "TEST__"
+
+
+def test_read_env_prefix_override_returns_none_when_environ_snapshot_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(loader_module, "_current_environ", lambda: _AlwaysBrokenEnviron())
+    assert read_env_prefix_override() is None
+
+
+def test_load_yaml_settings_returns_empty_mapping_when_file_disappears_during_read() -> None:
+    assert load_yaml_settings(_MissingOnReadPath()) == {}
+
+
+def test_load_dotenv_snapshot_raw_returns_empty_mapping_when_file_disappears_during_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(loader_module, "find_dotenv_path", lambda start_dir: _MissingOnReadPath("k=v"))
+    assert load_dotenv_snapshot_raw(start_dir=Path.cwd()) == {}

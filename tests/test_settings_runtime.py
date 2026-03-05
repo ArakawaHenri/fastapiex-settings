@@ -996,7 +996,7 @@ def test_manual_reload_restores_snapshot_after_monkeypatch(tmp_path: Path) -> No
     assert GetSettings(target=AppSettings, field="name") == "stable"
 
 
-def test_modules_change_triggers_snapshot_refresh_from_live_raw_when_reload_off(
+def test_unrelated_module_changes_do_not_force_refresh_when_reload_off(
     tmp_path: Path,
 ) -> None:
     @Settings("app")
@@ -1007,7 +1007,6 @@ def test_modules_change_triggers_snapshot_refresh_from_live_raw_when_reload_off(
     settings_file.write_text("app:\n  name: v1\n", encoding="utf-8")
     init_settings(settings_path=settings_file)
 
-    manager = get_settings_manager()
     assert GetSettings(target=AppSettings, field="name") == "v1"
 
     settings_file.write_text("app:\n  name: v2\n", encoding="utf-8")
@@ -1016,14 +1015,12 @@ def test_modules_change_triggers_snapshot_refresh_from_live_raw_when_reload_off(
     dynamic_name = "tests.module_change_trigger"
     sys.modules[dynamic_name] = types.ModuleType(dynamic_name)
     try:
-        assert dynamic_name not in manager._module_snapshot
         assert GetSettings(target=AppSettings, field="name") == "v1"
-        assert dynamic_name in manager._module_snapshot
     finally:
         sys.modules.pop(dynamic_name, None)
 
 
-def test_rediscovery_removes_stale_section_after_module_replacement(tmp_path: Path) -> None:
+def test_module_lifecycle_removes_stale_section_after_module_replacement(tmp_path: Path) -> None:
     module_v1 = types.ModuleType(DYNAMIC_MODULE)
     sys.modules[DYNAMIC_MODULE] = module_v1
     exec(
@@ -1048,11 +1045,167 @@ class DynSettings(BaseSettings):
     module_v2.__dict__["__name__"] = DYNAMIC_MODULE
     sys.modules[DYNAMIC_MODULE] = module_v2
 
-    # phase-A miss should trigger rediscovery and remove stale declarations.
+    # phase-A miss should trigger lifecycle reconciliation and remove stale declarations.
     assert GetSettings(target="dyn", field="missing", default=-1) == -1
 
     with pytest.raises(SettingsResolveError):
         GetSettings(target="dyn", field="a")
+
+
+def test_module_lifecycle_reconcile_handles_mid_scan_module_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module_v1 = types.ModuleType(DYNAMIC_MODULE)
+    sys.modules[DYNAMIC_MODULE] = module_v1
+    exec(
+        """
+from fastapiex.settings import BaseSettings, Settings
+
+@Settings("dyn")
+class DynSettings(BaseSettings):
+    a: int
+""",
+        module_v1.__dict__,
+    )
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("dyn:\n  a: 13\n", encoding="utf-8")
+    init_settings(settings_path=settings_file)
+    assert GetSettings(target="dyn", field="a") == 13
+
+    registry = registry_module.get_settings_registry()
+    original_check = registry._record_is_live_locked
+    replaced = False
+
+    def _replace_module_before_liveness_check(*, model: type[BaseSettings], record: object) -> bool:
+        nonlocal replaced
+        if not replaced:
+            module_v2 = types.ModuleType(DYNAMIC_MODULE)
+            module_v2.__dict__["__name__"] = DYNAMIC_MODULE
+            sys.modules[DYNAMIC_MODULE] = module_v2
+            replaced = True
+        return original_check(model=model, record=record)
+
+    monkeypatch.setattr(registry, "_record_is_live_locked", _replace_module_before_liveness_check)
+
+    assert GetSettings(target="dyn", field="missing", default=-1) == -1
+    with pytest.raises(SettingsResolveError):
+        GetSettings(target="dyn", field="a")
+
+
+def test_module_lifecycle_removes_stale_section_after_inplace_module_reset(tmp_path: Path) -> None:
+    module = types.ModuleType(DYNAMIC_MODULE)
+    sys.modules[DYNAMIC_MODULE] = module
+    exec(
+        """
+from fastapiex.settings import BaseSettings, Settings
+
+@Settings("dyn")
+class DynSettings(BaseSettings):
+    a: int
+""",
+        module.__dict__,
+    )
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("dyn:\n  a: 7\n", encoding="utf-8")
+    init_settings(settings_path=settings_file)
+
+    assert GetSettings(target="dyn", field="a") == 7
+
+    module.__dict__.clear()
+    module.__dict__["__name__"] = DYNAMIC_MODULE
+
+    assert GetSettings(target="dyn", field="missing", default=-1) == -1
+    with pytest.raises(SettingsResolveError):
+        GetSettings(target="dyn", field="a")
+
+
+def test_same_module_identity_redefinition_replaces_declared_model(tmp_path: Path) -> None:
+    module = types.ModuleType(DYNAMIC_MODULE)
+    sys.modules[DYNAMIC_MODULE] = module
+
+    exec(
+        """
+from fastapiex.settings import BaseSettings, Settings
+
+@Settings("dyn")
+class DynSettings(BaseSettings):
+    a: int = 1
+""",
+        module.__dict__,
+    )
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("{}\n", encoding="utf-8")
+    init_settings(settings_path=settings_file)
+    assert GetSettings(target="dyn", field="a") == 1
+
+    exec(
+        """
+from fastapiex.settings import BaseSettings, Settings
+
+@Settings("dyn")
+class DynSettings(BaseSettings):
+    b: int = 2
+""",
+        module.__dict__,
+    )
+
+    assert GetSettings(target="dyn", field="b") == 2
+    assert GetSettings(target="dyn", field="a", default=-1) == -1
+
+
+def test_reload_reconciles_module_unload_and_drops_stale_section(tmp_path: Path) -> None:
+    module = types.ModuleType(DYNAMIC_MODULE)
+    sys.modules[DYNAMIC_MODULE] = module
+    exec(
+        """
+from fastapiex.settings import BaseSettings, Settings
+
+@Settings("dyn")
+class DynSettings(BaseSettings):
+    a: int
+""",
+        module.__dict__,
+    )
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("dyn:\n  a: 11\n", encoding="utf-8")
+    init_settings(settings_path=settings_file)
+    assert GetSettings(target="dyn", field="a") == 11
+
+    sys.modules.pop(DYNAMIC_MODULE, None)
+    reload_settings(reason="module-unload")
+
+    with pytest.raises(SettingsResolveError):
+        GetSettings(target="dyn", field="a")
+
+
+def test_cached_miss_is_invalidated_when_new_declaration_registers(tmp_path: Path) -> None:
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("{}\n", encoding="utf-8")
+    init_settings(settings_path=settings_file)
+
+    assert GetSettings(target="dyn", field="a", default=-1) == -1
+
+    module = types.ModuleType(DYNAMIC_MODULE)
+    sys.modules[DYNAMIC_MODULE] = module
+    try:
+        exec(
+            """
+from fastapiex.settings import BaseSettings, Settings
+
+@Settings("dyn")
+class DynSettings(BaseSettings):
+    a: int = 7
+""",
+            module.__dict__,
+        )
+        assert GetSettings(target="dyn", field="a") == 7
+    finally:
+        sys.modules.pop(DYNAMIC_MODULE, None)
 
 
 def test_settings_source_is_process_global_and_singleton(tmp_path: Path) -> None:
