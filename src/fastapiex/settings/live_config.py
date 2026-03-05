@@ -235,7 +235,7 @@ def _flatten_mapping(
     flat: dict[tuple[str, ...], Any] = {}
 
     stack: list[_FlattenFrame] = [
-        _FlattenFrame(prefix=prefix, mapping=mapping, items=iter(mapping.items()))
+        _FlattenFrame(prefix=prefix, mapping=mapping, items=iter(_snapshot_mapping_items(mapping)))
     ]
     active_mapping_ids: set[int] = {id(mapping)}
 
@@ -264,10 +264,31 @@ def _flatten_mapping(
 
         active_mapping_ids.add(nested_id)
         stack.append(
-            _FlattenFrame(prefix=path, mapping=value, items=iter(value.items()))
+            _FlattenFrame(prefix=path, mapping=value, items=iter(_snapshot_mapping_items(value)))
         )
 
     return flat
+
+
+def _snapshot_mapping_items(mapping: Mapping[Any, Any]) -> tuple[tuple[Any, Any], ...]:
+    for _ in range(2):
+        try:
+            return tuple(mapping.items())
+        except (KeyError, RuntimeError):
+            continue
+
+    try:
+        keys = tuple(mapping.keys())
+    except (KeyError, RuntimeError):
+        return ()
+
+    items: list[tuple[Any, Any]] = []
+    for key in keys:
+        try:
+            items.append((key, mapping[key]))
+        except (KeyError, RuntimeError):
+            continue
+    return tuple(items)
 
 
 def _build_seed_slots(

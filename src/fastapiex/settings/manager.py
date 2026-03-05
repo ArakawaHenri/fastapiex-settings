@@ -17,7 +17,6 @@ from .controls import (
     normalize_override_path,
     read_control_model,
 )
-from .discovery import ModuleRediscovery, snapshot_imported_modules
 from .exceptions import SettingsResolveError, SettingsValidationError
 from .live_config import LiveConfigStore
 from .loader import (
@@ -77,8 +76,7 @@ class SettingsManager:
         self._settings: BaseModel | None = None
         self._lock = threading.RLock()
         self._source_sync = SourceSyncCoordinator()
-        self._module_rediscovery = ModuleRediscovery()
-        self._missing_cache: dict[str, tuple[int, int]] = {}
+        self._missing_cache: dict[str, int] = {}
         self._validation_fallback_warnings: set[str] = set()
 
         self._register_default_source_syncs()
@@ -128,14 +126,12 @@ class SettingsManager:
                 )
 
             self._source = source
-            if not self._module_snapshot:
-                self._set_module_snapshot_locked(snapshot_imported_modules())
             self._prepare_runtime_locked(
                 reason="init",
                 implicit_init=False,
                 source_sync="full",
                 force_refresh=True,
-                rediscover_modules=False,
+                sync_module_lifecycle=False,
             )
             return self._active_settings_locked()
 
@@ -191,7 +187,6 @@ class SettingsManager:
                 implicit_init=False,
                 source_sync="reload",
                 force_refresh=True,
-                rediscover_modules=False,
             )
             settings = self._active_settings_locked()
             logger.info("settings reloaded reason=%s", reason)
@@ -204,13 +199,13 @@ class SettingsManager:
         implicit_init: bool,
         source_sync: SourceSyncMode,
         force_refresh: bool = False,
-        rediscover_modules: bool = True,
+        sync_module_lifecycle: bool = True,
     ) -> None:
         self._ensure_source_locked(implicit=implicit_init)
         source_force_refresh = self._sync_sources_for_mode_locked(mode=source_sync)
         needs_control_convergence = force_refresh or source_force_refresh or self._settings is None
         controls_changed = self._converge_controls_locked() if needs_control_convergence else False
-        module_changed = self._maybe_rediscover_modules_locked() if rediscover_modules else False
+        module_changed = self._sync_module_lifecycle_locked() if sync_module_lifecycle else False
         self._refresh_runtime_locked(
             reason=reason,
             force=force_refresh or source_force_refresh or controls_changed or module_changed,
@@ -232,7 +227,7 @@ class SettingsManager:
             initial_attempt = self._attempt_resolve_locked(
                 request=request,
                 reason="resolve:registered",
-                rediscover_modules=True,
+                sync_module_lifecycle=True,
             )
             if initial_attempt.resolved:
                 return initial_attempt.value
@@ -241,12 +236,12 @@ class SettingsManager:
             query_error = initial_attempt.query_error
             validation_error = initial_attempt.validation_error
 
-            if not self._should_skip_rediscovery_locked(cache_key):
-                self._rediscover_delta_locked()
+            if not self._should_skip_reconcile_locked(cache_key):
+                self._sync_module_lifecycle_locked()
                 retry_attempt = self._attempt_resolve_locked(
                     request=request,
-                    reason="resolve:rediscover",
-                    rediscover_modules=False,
+                    reason="resolve:reconcile",
+                    sync_module_lifecycle=False,
                 )
                 if retry_attempt.resolved:
                     self._missing_cache.pop(cache_key, None)
@@ -269,14 +264,14 @@ class SettingsManager:
         *,
         request: ResolveRequest,
         reason: str,
-        rediscover_modules: bool,
+        sync_module_lifecycle: bool,
     ) -> _ResolveAttempt:
         try:
             self._prepare_runtime_locked(
                 reason=reason,
                 implicit_init=True,
                 source_sync="auto",
-                rediscover_modules=rediscover_modules,
+                sync_module_lifecycle=sync_module_lifecycle,
             )
             value = self._evaluate_request_locked(request)
             return _ResolveAttempt(resolved=True, value=value)
@@ -288,10 +283,7 @@ class SettingsManager:
             return _ResolveAttempt(resolved=False, validation_error=exc)
 
     def _mark_missing_cache_locked(self, cache_key: str) -> None:
-        self._missing_cache[cache_key] = (
-            get_settings_registry().version(),
-            self._module_fingerprint,
-        )
+        self._missing_cache[cache_key] = get_settings_registry().version()
 
     def _finalize_resolve_failure_locked(
         self,
@@ -322,11 +314,11 @@ class SettingsManager:
             case_sensitive=source.case_sensitive,
         )
 
-    def _should_skip_rediscovery_locked(self, cache_key: str) -> bool:
+    def _should_skip_reconcile_locked(self, cache_key: str) -> bool:
         marker = self._missing_cache.get(cache_key)
         if marker is None:
             return False
-        current = (get_settings_registry().version(), self._module_fingerprint)
+        current = get_settings_registry().version()
         return marker == current
 
     def _warn_validation_fallback_once_locked(
@@ -358,7 +350,6 @@ class SettingsManager:
             settings_path=None,
             env_prefix=None,
         )
-        self._set_module_snapshot_locked(snapshot_imported_modules())
         self._live_config, _ = self._source_sync.reload_all(live_config=self._live_config)
         logger.info("settings initialized implicitly source=%s", self._source)
 
@@ -439,13 +430,11 @@ class SettingsManager:
             case_sensitive=source.case_sensitive,
         )
 
-    def _maybe_rediscover_modules_locked(self) -> bool:
-        current_snapshot = snapshot_imported_modules()
-        if current_snapshot == self._module_snapshot:
-            return False
-
-        self._rediscover_delta_locked(current_snapshot=current_snapshot)
-        return True
+    def _sync_module_lifecycle_locked(self) -> bool:
+        changed = get_settings_registry().reconcile_runtime_modules()
+        if changed:
+            self._missing_cache.clear()
+        return changed
 
     def _refresh_runtime_locked(self, *, reason: str, force: bool = False) -> None:
         source = self._active_source_locked()
@@ -512,27 +501,6 @@ class SettingsManager:
             return schema.root_model.model_validate(projected)
         except ValidationError as exc:
             raise SettingsValidationError(str(exc)) from exc
-
-    def _rediscover_delta_locked(
-        self,
-        *,
-        current_snapshot: dict[str, int] | None = None,
-    ) -> bool:
-        changed = self._module_rediscovery.rediscover_delta(current_snapshot=current_snapshot)
-        if changed:
-            self._missing_cache.clear()
-        return changed
-
-    def _set_module_snapshot_locked(self, snapshot: dict[str, int]) -> None:
-        self._module_rediscovery.set_snapshot(snapshot)
-
-    @property
-    def _module_snapshot(self) -> dict[str, int]:
-        return self._module_rediscovery.snapshot
-
-    @property
-    def _module_fingerprint(self) -> int:
-        return self._module_rediscovery.fingerprint
 
     def _resolve_source(
         self,

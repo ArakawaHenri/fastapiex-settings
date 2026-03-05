@@ -4,6 +4,7 @@ import sys
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from types import ModuleType
 from typing import TypeVar, overload
 
 from pydantic import BaseModel
@@ -71,12 +72,36 @@ class SettingsRegistry:
             previous_version = self._version
 
             try:
+                changed = False
+
                 for existing_model, existing_record in list(self._records_by_model.items()):
                     if existing_record.owner_module != owner_module:
                         continue
                     if existing_record.owner_identity == owner_identity:
                         continue
                     del self._records_by_model[existing_model]
+                    changed = True
+
+                changed = self._drop_stale_records_for_owner_locked(
+                    owner_module=owner_module,
+                    owner_identity=owner_identity,
+                ) or changed
+
+                # Allow in-place class redefinition in the same module identity
+                # when the section path and class name are unchanged.
+                for existing_model, existing_record in list(self._records_by_model.items()):
+                    if existing_record.owner_module != owner_module:
+                        continue
+                    if existing_record.owner_identity != owner_identity:
+                        continue
+                    if existing_model is model:
+                        continue
+                    if existing_record.spec.path != spec.path:
+                        continue
+                    if existing_model.__name__ != model.__name__:
+                        continue
+                    del self._records_by_model[existing_model]
+                    changed = True
 
                 existing = self._records_by_model.get(model)
                 candidate = _SectionRecord(
@@ -85,6 +110,8 @@ class SettingsRegistry:
                     owner_identity=owner_identity,
                 )
                 if existing == candidate:
+                    if changed:
+                        self._reindex_locked()
                     return
 
                 self._records_by_model[model] = candidate
@@ -94,6 +121,19 @@ class SettingsRegistry:
                 self._sections_by_path = previous_sections
                 self._version = previous_version
                 raise
+
+    def reconcile_runtime_modules(self) -> bool:
+        with self._lock:
+            changed = False
+            for model, record in list(self._records_by_model.items()):
+                if self._record_is_live_locked(model=model, record=record):
+                    continue
+                del self._records_by_model[model]
+                changed = True
+
+            if changed:
+                self._reindex_locked()
+            return changed
 
     def unregister_owner(self, owner_module: str, *, owner_identity: int | None = None) -> None:
         with self._lock:
@@ -133,6 +173,35 @@ class SettingsRegistry:
 
         self._sections_by_path = new_sections
         self._version += 1
+
+    def _drop_stale_records_for_owner_locked(self, *, owner_module: str, owner_identity: int) -> bool:
+        removed = False
+        for model, record in list(self._records_by_model.items()):
+            if record.owner_module != owner_module:
+                continue
+            if record.owner_identity != owner_identity:
+                continue
+            if self._record_is_live_locked(model=model, record=record):
+                continue
+            del self._records_by_model[model]
+            removed = True
+        return removed
+
+    @staticmethod
+    def _record_is_live_locked(*, model: type[BaseModel], record: _SectionRecord) -> bool:
+        module = sys.modules.get(record.owner_module)
+        if not isinstance(module, ModuleType):
+            return False
+        if id(module) != record.owner_identity:
+            return False
+
+        if "<locals>" in model.__qualname__:
+            return True
+
+        namespace = getattr(module, "__dict__", None)
+        if not isinstance(namespace, dict):
+            return False
+        return namespace.get(model.__name__) is model
 
 
 _GLOBAL_REGISTRY = SettingsRegistry()
