@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import logging
 import os
 import sys
@@ -22,6 +23,7 @@ from fastapiex.settings import (
 from fastapiex.settings import manager as manager_module
 from fastapiex.settings import registry as registry_module
 from fastapiex.settings.manager import get_settings_manager
+from fastapiex.settings.source_contract import LoadedSource, SourceBinding, SourcePolicy, SourceSpec
 
 SettingsRegistrationError = exceptions.SettingsRegistrationError
 SettingsResolveError = exceptions.SettingsResolveError
@@ -312,8 +314,9 @@ def test_snapshot_control_env_prefix_reprojects_env_from_raw(
     init_settings(settings_path=settings_file)
 
     manager = get_settings_manager()
-    assert manager._source is not None
-    assert manager._source.env_prefix == "ALT__"
+    runtime_view = manager.inspect_runtime()
+    assert runtime_view is not None
+    assert runtime_view.context.env_prefix == "ALT__"
     assert GetSettings(target=AppSettings, field="name") == "from-alt"
 
 
@@ -737,7 +740,7 @@ def test_dotenv_changes_are_not_watched_but_yaml_changes_are(
     assert GetSettings(target=AppSettings, field="name") == "yaml-v2"
 
 
-def test_dotenv_can_be_registered_as_runtime_sync_source(
+def test_dotenv_source_can_enable_runtime_sync(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -758,16 +761,291 @@ def test_dotenv_can_be_registered_as_runtime_sync_source(
     assert GetSettings(target=AppSettings, field="name") == "dotenv-v1"
 
     manager = get_settings_manager()
-    manager.register_source_sync("dotenv", sync_on_reload=True)
+    builtin_dotenv = manager.get_source("dotenv")
+    assert builtin_dotenv is not None
+    manager.register_source(
+        replace(
+            builtin_dotenv,
+            policy=replace(
+                builtin_dotenv.policy,
+                auto_refresh=True,
+                manual_refresh=True,
+            ),
+        )
+    )
 
     dotenv_file.write_text("TEST__APP__NAME=dotenv-v3\n", encoding="utf-8")
     assert GetSettings(target=AppSettings, field="name") == "dotenv-v3"
 
 
-def test_register_source_sync_rejects_unknown_source() -> None:
+def test_custom_source_spec_can_be_registered() -> None:
     manager = get_settings_manager()
-    with pytest.raises(ValueError, match="unknown source 'custom'"):
-        manager.register_source_sync("custom", read_snapshot=lambda: ({}, None))
+    manager.register_source(
+        SourceSpec(
+            name="custom",
+            priority=4,
+            projection_kind="mapping",
+            policy=SourcePolicy(
+                auto_refresh=False,
+                manual_refresh=False,
+                follow_context=False,
+            ),
+            bind=lambda context: SourceBinding(source="custom", descriptor=("custom", context.settings_path)),
+            probe=lambda binding: binding.descriptor,
+            load=lambda binding: LoadedSource(token=binding.descriptor, payload={}),
+        )
+    )
+    assert manager.get_source("custom") is not None
+
+
+def test_replacing_source_spec_rebinds_on_forced_full_refresh(tmp_path: Path) -> None:
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str
+
+    manager = get_settings_manager()
+    manager.register_source(
+        SourceSpec(
+            name="custom",
+            priority=4,
+            projection_kind="mapping",
+            policy=SourcePolicy(
+                auto_refresh=False,
+                manual_refresh=True,
+                follow_context=False,
+            ),
+            bind=lambda context: SourceBinding(source="custom", descriptor=("kind-a", "a")),
+            probe=lambda binding: binding.descriptor,
+            load=lambda binding: LoadedSource(
+                token=binding.descriptor,
+                payload={"app": {"name": str(binding.descriptor)}},
+            ),
+        )
+    )
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("app:\n  name: yaml\n", encoding="utf-8")
+    init_settings(settings_path=settings_file)
+    reload_settings(reason="load-custom-a")
+    assert GetSettings(target=AppSettings, field="name") == "('kind-a', 'a')"
+
+    manager.register_source(
+        SourceSpec(
+            name="custom",
+            priority=4,
+            projection_kind="mapping",
+            policy=SourcePolicy(
+                auto_refresh=False,
+                manual_refresh=True,
+                follow_context=False,
+            ),
+            bind=lambda context: SourceBinding(source="custom", descriptor=("kind-b", "b")),
+            probe=lambda binding: binding.descriptor,
+            load=lambda binding: LoadedSource(
+                token=binding.descriptor,
+                payload={"app": {"name": str(binding.descriptor)}},
+            ),
+        )
+    )
+    reload_settings(reason="load-custom-b")
+
+    runtime_view = manager.inspect_runtime()
+    assert runtime_view is not None
+    assert GetSettings(target=AppSettings, field="name") == "('kind-b', 'b')"
+    custom_snapshot = next(snapshot for snapshot in runtime_view.snapshots if snapshot.source == "custom")
+    assert custom_snapshot.binding.descriptor == ("kind-b", "b")
+
+
+def test_unregistered_source_is_pruned_from_runtime_snapshots(tmp_path: Path) -> None:
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str
+
+    manager = get_settings_manager()
+    manager.register_source(
+        SourceSpec(
+            name="ephemeral",
+            priority=4,
+            projection_kind="mapping",
+            policy=SourcePolicy(
+                auto_refresh=False,
+                manual_refresh=True,
+                follow_context=False,
+            ),
+            bind=lambda context: SourceBinding(source="ephemeral", descriptor=("ephemeral", 1)),
+            probe=lambda binding: binding.descriptor,
+            load=lambda binding: LoadedSource(
+                token=binding.descriptor,
+                payload={"app": {"name": "ephemeral"}},
+            ),
+        )
+    )
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("app:\n  name: yaml\n", encoding="utf-8")
+    init_settings(settings_path=settings_file)
+    reload_settings(reason="load-ephemeral")
+    assert GetSettings(target=AppSettings, field="name") == "ephemeral"
+
+    runtime_view = manager.inspect_runtime()
+    assert runtime_view is not None
+    assert any(snapshot.source == "ephemeral" for snapshot in runtime_view.snapshots)
+
+    manager.unregister_source("ephemeral")
+    reload_settings(reason="prune-ephemeral")
+    assert GetSettings(target=AppSettings, field="name") == "yaml"
+
+    runtime_view = manager.inspect_runtime()
+    assert runtime_view is not None
+    assert all(snapshot.source != "ephemeral" for snapshot in runtime_view.snapshots)
+
+
+def test_custom_dotenv_source_spec_drives_auto_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FASTAPIEX__SETTINGS__RELOAD", "on_change")
+
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str
+
+    snapshots = [
+        ({"TEST__APP__NAME": "dotenv-v1"}, "v1"),
+        ({"TEST__APP__NAME": "dotenv-v2"}, "v2"),
+    ]
+    state = {"index": 0}
+
+    manager = get_settings_manager()
+    builtin_dotenv = manager.get_source("dotenv")
+    assert builtin_dotenv is not None
+
+    def _custom_dotenv_probe(_: SourceBinding) -> str:
+        return snapshots[state["index"]][1]
+
+    def _custom_dotenv_load(_: SourceBinding) -> LoadedSource:
+        payload, token = snapshots[state["index"]]
+        return LoadedSource(token=token, payload=dict(payload))
+
+    manager.register_source(
+        replace(
+            builtin_dotenv,
+            policy=replace(
+                builtin_dotenv.policy,
+                auto_refresh=True,
+                manual_refresh=True,
+            ),
+            probe=_custom_dotenv_probe,
+            load=_custom_dotenv_load,
+        )
+    )
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("app:\n  name: yaml\n", encoding="utf-8")
+    init_settings(settings_path=settings_file)
+
+    assert GetSettings(target=AppSettings, field="name") == "dotenv-v1"
+
+    state["index"] = 1
+    assert GetSettings(target=AppSettings, field="name") == "dotenv-v2"
+
+
+def test_custom_dotenv_source_spec_can_revert_to_builtin_loader(tmp_path: Path) -> None:
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str
+
+    manager = get_settings_manager()
+    builtin_dotenv = manager.get_source("dotenv")
+    assert builtin_dotenv is not None
+    state = {"value": "custom-v1"}
+    manager.register_source(
+        replace(
+            builtin_dotenv,
+            policy=replace(
+                builtin_dotenv.policy,
+                auto_refresh=True,
+                manual_refresh=True,
+            ),
+            probe=lambda binding: state["value"],
+            load=lambda binding: LoadedSource(
+                token=state["value"],
+                payload={"TEST__APP__NAME": state["value"]},
+            ),
+        )
+    )
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("app:\n  name: yaml\n", encoding="utf-8")
+    init_settings(settings_path=settings_file)
+    reload_settings(reason="use-custom-dotenv")
+    assert GetSettings(target=AppSettings, field="name") == "custom-v1"
+
+    manager.register_source(
+        replace(
+            builtin_dotenv,
+            policy=replace(
+                builtin_dotenv.policy,
+                auto_refresh=True,
+                manual_refresh=True,
+            ),
+        )
+    )
+    state["value"] = "custom-v2"
+    reload_settings(reason="restore-default-dotenv")
+    assert GetSettings(target=AppSettings, field="name") == "yaml"
+
+
+def test_custom_yaml_loader_in_explicit_file_mode_uses_real_file_existence(tmp_path: Path) -> None:
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str
+
+    manager = get_settings_manager()
+    builtin_yaml = manager.get_source("yaml")
+    assert builtin_yaml is not None
+    manager.register_source(
+        replace(
+            builtin_yaml,
+            probe=lambda binding: "token",
+            load=lambda binding: LoadedSource(
+                token="token",
+                payload={"app": {"name": "custom"}},
+            ),
+        )
+    )
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("app:\n  name: yaml\n", encoding="utf-8")
+
+    init_settings(settings_path=settings_file)
+    assert GetSettings(target=AppSettings, field="name") == "custom"
+
+
+def test_custom_yaml_loader_can_own_explicit_file_mode_without_local_file(tmp_path: Path) -> None:
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str
+
+    manager = get_settings_manager()
+    builtin_yaml = manager.get_source("yaml")
+    assert builtin_yaml is not None
+    manager.register_source(
+        replace(
+            builtin_yaml,
+            bind=lambda context: SourceBinding(source="yaml", descriptor=("remote-yaml", str(context.settings_path))),
+            probe=lambda binding: binding.descriptor,
+            load=lambda binding: LoadedSource(
+                token="token",
+                payload={"app": {"name": "remote"}},
+            ),
+            validate_final_binding=None,
+        )
+    )
+
+    missing_file = tmp_path / "missing.yaml"
+    init_settings(settings_path=missing_file)
+    assert GetSettings(target=AppSettings, field="name") == "remote"
 
 
 def test_dotenv_path_switch_sync_can_be_enabled_explicitly(
@@ -802,7 +1080,17 @@ def test_dotenv_path_switch_sync_can_be_enabled_explicitly(
     assert GetSettings(target=AppSettings, field="token") == "token-first"
 
     manager = get_settings_manager()
-    manager.register_source_sync("dotenv", sync_on_path_switch=True)
+    builtin_dotenv = manager.get_source("dotenv")
+    assert builtin_dotenv is not None
+    manager.register_source(
+        replace(
+            builtin_dotenv,
+            policy=replace(
+                builtin_dotenv.policy,
+                follow_context=True,
+            ),
+        )
+    )
 
     first_yaml.write_text(
         f'app:\n  name: first-updated\nfastapiex:\n  settings:\n    path: "{second_yaml}"\n',
@@ -1251,8 +1539,9 @@ def test_reload_true_startup_follows_multi_hop_settings_path_chain(
     init_settings(settings_path=first)
 
     manager = get_settings_manager()
-    assert manager._source is not None
-    assert manager._source.settings_path == third
+    runtime_view = manager.inspect_runtime()
+    assert runtime_view is not None
+    assert runtime_view.context.settings_path == third
     assert GetSettings(target=AppSettings, field="name") == "third"
 
 
@@ -1287,8 +1576,9 @@ def test_reload_true_runtime_yaml_change_can_trigger_multi_hop_path_switch(
 
     manager = get_settings_manager()
     assert GetSettings(target=AppSettings, field="name") == "third"
-    assert manager._source is not None
-    assert manager._source.settings_path == third
+    runtime_view = manager.inspect_runtime()
+    assert runtime_view is not None
+    assert runtime_view.context.settings_path == third
 
 
 def test_fastapiex_controls_with_mixed_case_across_yaml_dotenv_env_follow_source_precedence(
@@ -1522,8 +1812,45 @@ def test_reload_true_with_settings_path_cycle_warns_and_stops_at_current_source(
     init_settings(settings_path=first)
 
     manager = get_settings_manager()
-    assert manager._source is not None
-    assert manager._source.settings_path == second
+    runtime_view = manager.inspect_runtime()
+    assert runtime_view is not None
+    assert runtime_view.context.settings_path == second
+    assert GetSettings(target=AppSettings, field="name") == "second"
+
+    warning_messages = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+    assert any("path control cycle detected" in message for message in warning_messages)
+
+
+def test_path_cycle_detection_keys_by_settings_path_not_entire_source(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FASTAPIEX__SETTINGS__RELOAD", "true")
+    monkeypatch.delenv("FASTAPIEX__SETTINGS__ENV_PREFIX", raising=False)
+    caplog.set_level(logging.WARNING)
+
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str
+
+    first = tmp_path / "first.yaml"
+    second = tmp_path / "second.yaml"
+    first.write_text(
+        f'fastapiex:\n  settings:\n    path: "{second}"\napp:\n  name: first\n',
+        encoding="utf-8",
+    )
+    second.write_text(
+        f'fastapiex:\n  settings:\n    path: "{first}"\napp:\n  name: second\n',
+        encoding="utf-8",
+    )
+
+    init_settings(settings_path=first, env_prefix="TEST__")
+
+    manager = get_settings_manager()
+    runtime_view = manager.inspect_runtime()
+    assert runtime_view is not None
+    assert runtime_view.context.settings_path == second
     assert GetSettings(target=AppSettings, field="name") == "second"
 
     warning_messages = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]

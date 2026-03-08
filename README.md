@@ -306,14 +306,25 @@ Opt-in `.env` runtime sync (advanced):
 - This is not part of the package-root public API. Use manager helper explicitly:
 
 ```python
+from dataclasses import replace
+
 from fastapiex.settings import reload_settings
-from fastapiex.settings.manager import register_source_sync
+from fastapiex.settings.manager import get_source, register_source
 
-# include `.env` in runtime reload passes
-register_source_sync("dotenv", sync_on_reload=True)
+dotenv = get_source("dotenv")
+assert dotenv is not None
 
-# optional: also follow `fastapiex.settings.path` source switches
-register_source_sync("dotenv", sync_on_path_switch=True)
+register_source(
+    replace(
+        dotenv,
+        policy=replace(
+            dotenv.policy,
+            auto_refresh=True,
+            manual_refresh=True,
+            follow_context=True,
+        ),
+    )
+)
 
 # optional: force one immediate re-ingest after enabling sync
 reload_settings(reason="enable-dotenv-sync")
@@ -321,10 +332,11 @@ reload_settings(reason="enable-dotenv-sync")
 
 Parameter meaning:
 
-- `source="dotenv"`: target `.env` source behavior.
-- `sync_on_reload=True`: re-read `.env` during reload pass (`RELOAD=on_change|always`, and manual `reload_settings`).
-- `sync_on_path_switch=True`: when runtime settings file path switches, also re-read `.env` from the new settings directory.
-- `read_snapshot`: normally omitted; keep default reader unless you are replacing source IO behavior.
+- `get_source("dotenv")`: read the current builtin `.env` source spec.
+- `register_source(...)`: replace the `.env` source spec with an updated one.
+- `auto_refresh=True`: re-read `.env` during auto refresh passes (`RELOAD=on_change|always`).
+- `manual_refresh=True`: include `.env` in manual `reload_settings()`.
+- `follow_context=True`: when runtime settings file path switches, also rebind `.env` to the new anchor directory.
 
 ### Monkeypatch / Black Magic
 

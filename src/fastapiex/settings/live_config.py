@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .constants import SOURCE_ORDER, SOURCE_PRIORITY
-from .types import SourceName
+from .types import ProjectionKind, SourceName
 
 
 @dataclass(frozen=True)
@@ -18,9 +18,22 @@ class _SourceValue:
 @dataclass(frozen=True)
 class SourceEntry:
     source: SourceName
+    priority: int
+    kind: ProjectionKind
+    include_in_control: bool
     path: tuple[str, ...]
     rev: int
     value: Any
+
+
+@dataclass(frozen=True)
+class EntrySource:
+    source: SourceName
+    priority: int
+    kind: ProjectionKind
+    include_in_control: bool
+    rev: int
+    mapping: Mapping[Any, Any]
 
 
 @dataclass
@@ -96,12 +109,15 @@ class LiveConfigStore:
                 rows.append(
                     SourceEntry(
                         source=source,
+                        priority=SOURCE_PRIORITY[source],
+                        kind=_builtin_projection_kind(source),
+                        include_in_control=True,
                         path=path,
                         rev=value.rev,
                         value=deepcopy(value.value),
                     )
                 )
-        rows.sort(key=lambda row: (row.rev, SOURCE_PRIORITY[row.source], row.path, row.source))
+        rows.sort(key=lambda row: (row.rev, row.priority, row.path, row.source))
         return tuple(rows)
 
     def _validate_update_sources(self, updates: Mapping[SourceName, Mapping[Any, Any]]) -> None:
@@ -304,9 +320,54 @@ def _build_seed_slots(
     return slots
 
 
+def build_entries_from_sources(sources: Mapping[SourceName, tuple[int, Mapping[Any, Any]]]) -> tuple[SourceEntry, ...]:
+    rows: list[EntrySource] = []
+    for source in SOURCE_ORDER:
+        source_snapshot = sources.get(source)
+        if source_snapshot is None:
+            continue
+        rev, mapping = source_snapshot
+        rows.append(
+            EntrySource(
+                source=source,
+                priority=SOURCE_PRIORITY[source],
+                kind=_builtin_projection_kind(source),
+                include_in_control=True,
+                rev=rev,
+                mapping=mapping,
+            )
+        )
+    return build_entries_from_mappings(rows)
+
+
+def build_entries_from_mappings(sources: list[EntrySource]) -> tuple[SourceEntry, ...]:
+    rows: list[SourceEntry] = []
+    for source in sources:
+        flat = _flatten_mapping(source.mapping)
+        for path, value in flat.items():
+            rows.append(
+                SourceEntry(
+                    source=source.source,
+                    priority=source.priority,
+                    kind=source.kind,
+                    include_in_control=source.include_in_control,
+                    path=path,
+                    rev=source.rev,
+                    value=deepcopy(value),
+                )
+            )
+
+    rows.sort(key=lambda row: (row.rev, row.priority, row.path, row.source))
+    return tuple(rows)
+
+
 def _sort_sources(sources: list[SourceName]) -> list[SourceName]:
     ordered_set = set(sources)
     return [source for source in SOURCE_ORDER if source in ordered_set]
+
+
+def _builtin_projection_kind(source: SourceName) -> ProjectionKind:
+    return "mapping" if source == "yaml" else "env_like"
 
 
 def _build_materialized_snapshot(winners: Mapping[tuple[str, ...], tuple[int, int, Any]]) -> dict[str, Any]:

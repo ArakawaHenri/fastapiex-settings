@@ -7,7 +7,7 @@ from typing import Any, Protocol, get_args, get_origin
 
 from pydantic import BaseModel
 
-from .constants import ENV_KEY_SEPARATOR, SOURCE_PRIORITY
+from .constants import ENV_KEY_SEPARATOR
 from .control_contract import CONTROL_ENV_PREFIX, CONTROL_ROOT, CONTROL_SPEC
 from .live_config import SourceEntry
 from .loader import key_to_parts, parse_env_value
@@ -96,7 +96,9 @@ class _ControlProjectionPolicy:
     control_env_prefix: str = CONTROL_ENV_PREFIX
 
     def project(self, entry: SourceEntry) -> _ProjectedEntry | None:
-        if entry.source == "yaml":
+        if not entry.include_in_control:
+            return None
+        if entry.kind == "mapping":
             return self._project_yaml(entry)
         return _project_env_entry(entry, key_to_path=self._control_env_key_to_path)
 
@@ -129,7 +131,7 @@ class _SettingsProjectionPolicy:
     case_sensitive: bool
 
     def project(self, entry: SourceEntry) -> _ProjectedEntry | None:
-        if entry.source == "yaml":
+        if entry.kind == "mapping":
             return _project_yaml_entry(entry)
         return _project_env_entry(entry, key_to_path=self._settings_env_key_to_path)
 
@@ -174,7 +176,7 @@ def _collect_projected_winners(
             continue
 
         path, value = projected
-        meta = (entry.rev, SOURCE_PRIORITY[entry.source])
+        meta = (entry.rev, entry.priority)
         existing = winners.get(path)
         if existing is not None and meta <= (existing[0], existing[1]):
             continue

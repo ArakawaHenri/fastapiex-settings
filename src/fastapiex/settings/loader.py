@@ -20,10 +20,12 @@ from .constants import (
     TRUE_TEXT_VALUES,
 )
 from .control_contract import CONTROL_ENV_PREFIX, SETTINGS_ENV_PREFIX_ENV_KEY
+from .types import SourceState
 
 logger = logging.getLogger(__name__)
 _INTERNAL_ENV_RESERVED_PREFIX = CONTROL_ENV_PREFIX
 _ENV_SNAPSHOT_ATTEMPTS = 3
+_FILE_SNAPSHOT_ATTEMPTS = 3
 _INT_RE = re.compile(r"^[+-]?\d(?:_?\d)*$")
 _FLOAT_RE = re.compile(
     r"^[+-]?(?:\d(?:_?\d)*)[eE][+-]?\d+$|"
@@ -100,18 +102,32 @@ def resolve_env_prefix(prefix: str | None = None) -> str:
     return value
 
 
-def load_yaml_settings(path: Path) -> dict[str, Any]:
+def file_state(path: Path | None) -> SourceState:
+    if path is None:
+        return ("", False, 0, 0)
+    resolved = path.expanduser().resolve()
     try:
-        text = path.read_text(encoding="utf-8")
+        stat_result = resolved.stat()
     except FileNotFoundError:
-        return {}
+        return (str(resolved), False, 0, 0)
+    return (str(resolved), True, stat_result.st_mtime_ns, stat_result.st_size)
 
+
+def _parse_yaml_mapping(text: str, *, path: Path) -> dict[str, Any]:
     raw = yaml.safe_load(text)
     if raw is None:
         return {}
     if not isinstance(raw, dict):
         raise TypeError(f"settings file must contain a mapping at top-level: {path}")
     return raw
+
+
+def load_yaml_settings(path: Path) -> dict[str, Any]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    return _parse_yaml_mapping(text, path=path)
 
 
 def load_env_snapshot_raw() -> dict[str, str]:
@@ -146,18 +162,9 @@ def find_dotenv_path(start_dir: Path) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def load_dotenv_snapshot_raw(*, start_dir: Path) -> dict[str, str]:
-    dotenv_path = find_dotenv_path(start_dir)
-    if dotenv_path is None:
-        return {}
-
+def _parse_dotenv_pairs(text: str) -> dict[str, str]:
     pairs: dict[str, str] = {}
-    try:
-        lines = dotenv_path.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
-        return {}
-
-    for raw_line in lines:
+    for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
@@ -174,12 +181,35 @@ def load_dotenv_snapshot_raw(*, start_dir: Path) -> dict[str, str]:
     return pairs
 
 
+def load_dotenv_file(path: Path) -> dict[str, str]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    return _parse_dotenv_pairs(text)
+
+
+def load_dotenv_snapshot_raw(*, start_dir: Path) -> dict[str, str]:
+    dotenv_path = find_dotenv_path(start_dir)
+    if dotenv_path is None:
+        return {}
+    return load_dotenv_file(dotenv_path)
+
+
 def load_dotenv_overrides(*, start_dir: Path, prefix: str = DEFAULT_ENV_PREFIX, case_sensitive: bool) -> dict[str, Any]:
     return parse_env_snapshot(
         load_dotenv_snapshot_raw(start_dir=start_dir),
         prefix=prefix,
         case_sensitive=case_sensitive,
     )
+
+
+def load_yaml_file_snapshot(path: Path) -> tuple[dict[str, Any], SourceState]:
+    return _load_stable_file_snapshot(path, parser=lambda text: _parse_yaml_mapping(text, path=path))
+
+
+def load_dotenv_file_snapshot(path: Path) -> tuple[dict[str, str], SourceState]:
+    return _load_stable_file_snapshot(path, parser=_parse_dotenv_pairs)
 
 
 def set_nested_mapping(target: dict[str, Any], parts: list[str], value: Any) -> None:
@@ -293,3 +323,39 @@ def _startswith_prefix(value: str, prefix: str, *, case_sensitive: bool) -> bool
     if case_sensitive:
         return value.startswith(prefix)
     return value.casefold().startswith(prefix.casefold())
+
+
+def _load_stable_file_snapshot(
+    path: Path,
+    *,
+    parser: Any,
+) -> tuple[Any, SourceState]:
+    resolved = path.expanduser().resolve()
+    final_error: Exception | None = None
+
+    for _ in range(_FILE_SNAPSHOT_ATTEMPTS):
+        before = file_state(resolved)
+        try:
+            text = resolved.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            after_missing = file_state(resolved)
+            if before == after_missing:
+                return {}, after_missing
+            continue
+        except Exception as exc:  # pragma: no cover - rare IO edge
+            final_error = exc
+            after_error = file_state(resolved)
+            if before != after_error:
+                continue
+            raise
+
+        after = file_state(resolved)
+        if before != after:
+            continue
+
+        return parser(text), after
+
+    if final_error is not None:
+        raise final_error
+
+    raise RuntimeError(f"file changed during snapshot read: {resolved}")
