@@ -5,27 +5,7 @@ from typing import Any
 
 from .control_contract import CONTROL_SPEC, ControlModel
 from .loader import load_env_overrides
-
-
-def _merge_casefold_mapping(
-    target: dict[str, Any],
-    incoming: Mapping[Any, Any],
-) -> None:
-    for key, value in incoming.items():
-        if not isinstance(key, str):
-            continue
-        canonical_key = key.casefold()
-        if isinstance(value, Mapping):
-            existing = target.get(canonical_key)
-            nested: dict[str, Any]
-            if isinstance(existing, dict):
-                nested = existing
-            else:
-                nested = {}
-                target[canonical_key] = nested
-            _merge_casefold_mapping(nested, value)
-            continue
-        target[canonical_key] = value
+from .projection import merge_nested_mapping, normalize_control_mapping
 
 
 def normalize_control_snapshot(snapshot: Mapping[Any, Any]) -> dict[str, Any]:
@@ -59,7 +39,7 @@ def _extract_control_mapping(
 
     merged: dict[str, Any] = {}
     for candidate in candidates:
-        _merge_casefold_mapping(merged, candidate)
+        merge_nested_mapping(merged, normalize_control_mapping(candidate))
     return merged
 
 def build_env_controls_snapshot() -> Mapping[Any, Any]:

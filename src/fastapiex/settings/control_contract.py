@@ -130,6 +130,11 @@ SETTINGS_ENV_PREFIX_ENV_KEY = ControlModel.nested_env_key(
     "env_prefix",
     separator=ENV_KEY_SEPARATOR,
 )
+SETTINGS_PATH_ENV_KEY = ControlModel.nested_env_key(
+    SettingsControls,
+    "path",
+    separator=ENV_KEY_SEPARATOR,
+)
 
 
 def is_control_root(segment: str) -> bool:
@@ -142,6 +147,7 @@ __all__ = [
     "CONTROL_SPEC",
     "ControlModel",
     "Fastapiex",
+    "SETTINGS_PATH_ENV_KEY",
     "SETTINGS_ENV_PREFIX_ENV_KEY",
     "SettingsControls",
     "is_control_root",

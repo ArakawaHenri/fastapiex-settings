@@ -3,13 +3,12 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
 from .builtin_sources import builtin_source_specs
-from .context import ConfigContext, build_config_context, resolve_settings_target
+from .context import ConfigContext, build_config_context
 from .controls import build_env_controls_snapshot, read_control_model
 from .exceptions import SettingsResolveError, SettingsValidationError
 from .projection import materialize_effective_snapshot, project_snapshot_for_validation
@@ -64,16 +63,8 @@ class SettingsManager:
         with self._lock:
             return inspect_runtime_state(self._runtime)
 
-    def init(
-        self,
-        *,
-        settings_path: str | Path | None = None,
-        env_prefix: str | None = None,
-    ) -> BaseModel:
-        context = self._resolve_context(
-            settings_path=settings_path,
-            env_prefix=env_prefix,
-        )
+    def init(self) -> BaseModel:
+        context = self._resolve_context()
 
         with self._lock:
             runtime = self._runtime
@@ -345,10 +336,7 @@ class SettingsManager:
         if not implicit:
             raise RuntimeError("settings are not initialized")
 
-        context = self._resolve_context(
-            settings_path=None,
-            env_prefix=None,
-        )
+        context = self._resolve_context()
         candidate = self._build_candidate_locked(
             initial_context=context,
             current_snapshots={},
@@ -467,18 +455,11 @@ class SettingsManager:
             self._registry_version = registry_version
         return self._active_schema_locked()
 
-    def _resolve_context(
-        self,
-        *,
-        settings_path: str | Path | None,
-        env_prefix: str | None,
-    ) -> ConfigContext:
+    def _resolve_context(self) -> ConfigContext:
         controls = build_env_controls_snapshot()
         control = read_control_model(controls)
         return build_config_context(
             control=control,
-            explicit_settings_target=resolve_settings_target(settings_path),
-            explicit_env_prefix=env_prefix,
             fallback_context=None,
         )
 
@@ -490,8 +471,6 @@ class SettingsManager:
         control = read_control_model(control_snapshot)
         return build_config_context(
             control=control,
-            explicit_settings_target=None,
-            explicit_env_prefix=None,
             fallback_context=fallback_context,
         )
 

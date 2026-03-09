@@ -7,16 +7,17 @@ from pathlib import Path
 import pytest
 
 from fastapiex.settings import loader as loader_module
-from fastapiex.settings.live_config import LiveConfigStore
+from fastapiex.settings.live_config import EntrySource, build_entries_from_mappings
 from fastapiex.settings.loader import (
-    load_dotenv_overrides,
-    load_dotenv_snapshot_raw,
+    load_dotenv_file_snapshot,
     load_env_snapshot_raw,
     load_env_overrides,
-    load_yaml_settings,
+    load_yaml_file_snapshot,
+    parse_env_snapshot,
     read_env_prefix_override,
     resolve_env_prefix,
 )
+from fastapiex.settings.projection import materialize_effective_snapshot
 
 
 @pytest.fixture(autouse=True)
@@ -35,16 +36,28 @@ def _reset_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _materialize_raw(*, path: Path, env_prefix: str, case_sensitive: bool) -> dict[str, object]:
     resolved_prefix = resolve_env_prefix(env_prefix)
-    yaml_raw = load_yaml_settings(path)
-    dotenv_raw = load_dotenv_overrides(
-        start_dir=path.parent,
+    yaml_raw, _ = load_yaml_file_snapshot(path)
+    dotenv_raw = parse_env_snapshot(
+        load_dotenv_file_snapshot(path.parent / ".env")[0],
         prefix=resolved_prefix,
         case_sensitive=case_sensitive,
     )
     env_raw = load_env_overrides(prefix=resolved_prefix, case_sensitive=case_sensitive)
-    store = LiveConfigStore()
-    store.reset({"yaml": yaml_raw, "dotenv": dotenv_raw, "env": env_raw})
-    return store.materialize()
+    entries = build_entries_from_mappings(
+        [
+            EntrySource(source="yaml", priority=1, kind="mapping", include_in_control=True, rev=1, mapping=yaml_raw),
+            EntrySource(
+                source="dotenv",
+                priority=2,
+                kind="mapping",
+                include_in_control=True,
+                rev=2,
+                mapping=dotenv_raw,
+            ),
+            EntrySource(source="env", priority=3, kind="mapping", include_in_control=True, rev=3, mapping=env_raw),
+        ]
+    )
+    return materialize_effective_snapshot(entries, env_prefix="", case_sensitive=case_sensitive)
 
 
 class _FlakyEnviron(Mapping[str, str]):
@@ -92,18 +105,6 @@ class _AlwaysBrokenEnviron(Mapping[str, str]):
 
     def __len__(self) -> int:
         return 0
-
-
-class _MissingOnReadPath:
-    def __init__(self, text: str = "") -> None:
-        self._text = text
-
-    def read_text(self, *, encoding: str) -> str:
-        _ = encoding
-        raise FileNotFoundError("disappeared during read")
-
-    def __str__(self) -> str:
-        return "<missing-path>"
 
 
 def test_loader_stack_applies_env_dotenv_yaml_precedence_case_insensitive(
@@ -344,12 +345,15 @@ def test_read_env_prefix_override_returns_none_when_environ_snapshot_unavailable
     assert read_env_prefix_override() is None
 
 
-def test_load_yaml_settings_returns_empty_mapping_when_file_disappears_during_read() -> None:
-    assert load_yaml_settings(_MissingOnReadPath()) == {}
+def test_load_yaml_file_snapshot_returns_empty_mapping_when_file_is_missing(tmp_path: Path) -> None:
+    payload, state = load_yaml_file_snapshot(tmp_path / "missing.yaml")
+    assert payload == {}
+    assert state is not None
+    assert state[1] is False
 
 
-def test_load_dotenv_snapshot_raw_returns_empty_mapping_when_file_disappears_during_read(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(loader_module, "find_dotenv_path", lambda start_dir: _MissingOnReadPath("k=v"))
-    assert load_dotenv_snapshot_raw(start_dir=Path.cwd()) == {}
+def test_load_dotenv_file_snapshot_returns_empty_mapping_when_file_is_missing(tmp_path: Path) -> None:
+    payload, state = load_dotenv_file_snapshot(tmp_path / "missing.env")
+    assert payload == {}
+    assert state is not None
+    assert state[1] is False

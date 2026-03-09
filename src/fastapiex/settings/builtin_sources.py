@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .constants import DOTENV_FILENAME
 from .context import ConfigContext
 from .exceptions import SettingsValidationError
 from .loader import (
@@ -63,7 +64,7 @@ def _bind_yaml(context: ConfigContext) -> SourceBinding:
 
 
 def _bind_dotenv(context: ConfigContext) -> SourceBinding:
-    return SourceBinding(source="dotenv", descriptor=(context.anchor_dir / ".env").resolve())
+    return SourceBinding(source="dotenv", descriptor=(context.anchor_dir / DOTENV_FILENAME).resolve())
 
 
 def _bind_env(_: ConfigContext) -> SourceBinding:

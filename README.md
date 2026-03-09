@@ -208,7 +208,6 @@ Behavior:
 def init_settings(
     *,
     settings_path: str | Path | None = None,
-    env_prefix: str | None = None,
 ) -> BaseModel
 ```
 
@@ -219,20 +218,17 @@ Role:
 Parameter behavior:
 
 - `settings_path`:
-  - explicit bootstrap path.
-  - only overrides the initial read of `FASTAPIEX__SETTINGS__PATH`.
-  - does not lock source selection after bootstrap.
-- `env_prefix`:
-  - business env prefix override.
-  - `None` means read from `FASTAPIEX__SETTINGS__ENV_PREFIX`.
-  - non-empty value is treated as raw string prefix and removed from env key names.
+  - when provided, `init_settings` writes `FASTAPIEX__SETTINGS__PATH` into process `os.environ` before bootstrap.
+  - this is a process-global side effect (same process, later refreshes/re-reads see this value).
+  - runtime still follows normal control resolution; path can still be changed later by controls.
 
-Bootstrap source order:
+Bootstrap resolution order:
 
-- `settings_path` arg
 - `FASTAPIEX__SETTINGS__PATH`
 - `FASTAPIEX__BASE_DIR` + `/settings.yaml`
 - `./settings.yaml`
+
+When `settings_path` arg is passed, it first overwrites `FASTAPIEX__SETTINGS__PATH`, then uses the same order above.
 
 Runtime source switch:
 
@@ -241,7 +237,8 @@ Runtime source switch:
 
 Re-init behavior:
 
-- Re-initializing with a different resolved source raises `RuntimeError`.
+- Re-initializing with a different resolved runtime context raises `RuntimeError`.
+- Runtime context includes: settings path/anchor/mode, env prefix, case mode, reload mode.
 
 ### `reload_settings`
 
@@ -291,8 +288,8 @@ Sources:
 
 Merge strategy:
 
-- LWW (last-write-wins by source update time)
-- if timestamps tie: `env > .env > yaml`
+- LWW (last-write-wins by source revision/update order)
+- if revision ties: `env > .env > yaml`
 
 Runtime reload:
 

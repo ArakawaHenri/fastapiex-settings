@@ -13,7 +13,6 @@ import yaml  # type: ignore[import-untyped]
 from .constants import (
     DEFAULT_ENV_PREFIX,
     DOTENV_EXPORT_PREFIX,
-    DOTENV_FILENAME,
     ENV_KEY_SEPARATOR,
     FALSE_TEXT_VALUES,
     NULL_TEXT_VALUES,
@@ -122,14 +121,6 @@ def _parse_yaml_mapping(text: str, *, path: Path) -> dict[str, Any]:
     return raw
 
 
-def load_yaml_settings(path: Path) -> dict[str, Any]:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return {}
-    return _parse_yaml_mapping(text, path=path)
-
-
 def load_env_snapshot_raw() -> dict[str, str]:
     return _snapshot_os_environ()
 
@@ -157,11 +148,6 @@ def load_env_overrides(*, prefix: str = DEFAULT_ENV_PREFIX, case_sensitive: bool
     )
 
 
-def find_dotenv_path(start_dir: Path) -> Path | None:
-    candidate = start_dir.resolve() / DOTENV_FILENAME
-    return candidate if candidate.is_file() else None
-
-
 def _parse_dotenv_pairs(text: str) -> dict[str, str]:
     pairs: dict[str, str] = {}
     for raw_line in text.splitlines():
@@ -179,29 +165,6 @@ def _parse_dotenv_pairs(text: str) -> dict[str, str]:
             continue
         pairs[env_key] = parse_dotenv_value(raw_value)
     return pairs
-
-
-def load_dotenv_file(path: Path) -> dict[str, str]:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return {}
-    return _parse_dotenv_pairs(text)
-
-
-def load_dotenv_snapshot_raw(*, start_dir: Path) -> dict[str, str]:
-    dotenv_path = find_dotenv_path(start_dir)
-    if dotenv_path is None:
-        return {}
-    return load_dotenv_file(dotenv_path)
-
-
-def load_dotenv_overrides(*, start_dir: Path, prefix: str = DEFAULT_ENV_PREFIX, case_sensitive: bool) -> dict[str, Any]:
-    return parse_env_snapshot(
-        load_dotenv_snapshot_raw(start_dir=start_dir),
-        prefix=prefix,
-        case_sensitive=case_sensitive,
-    )
 
 
 def load_yaml_file_snapshot(path: Path) -> tuple[dict[str, Any], SourceState]:

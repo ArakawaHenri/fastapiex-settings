@@ -72,19 +72,14 @@ def resolve_settings_target(
 def build_config_context(
     *,
     control: ControlModel,
-    explicit_settings_target: ResolvedSettingsTarget | None,
-    explicit_env_prefix: str | None,
     fallback_context: ConfigContext | None,
 ) -> ConfigContext:
     resolved_target = _resolve_settings_target_from_control(
-        explicit_settings_target=explicit_settings_target,
         control_settings_path=control.settings.path,
         control_base_dir=control.base_dir,
         fallback_context=fallback_context,
     )
-    resolved_env_prefix = resolve_env_prefix(
-        explicit_env_prefix if explicit_env_prefix is not None else control.settings.env_prefix
-    )
+    resolved_env_prefix = resolve_env_prefix(control.settings.env_prefix)
     return ConfigContext(
         settings_path=resolved_target.settings_path,
         anchor_dir=resolved_target.anchor_dir,
@@ -97,14 +92,10 @@ def build_config_context(
 
 def _resolve_settings_target_from_control(
     *,
-    explicit_settings_target: ResolvedSettingsTarget | None,
     control_settings_path: str | None,
     control_base_dir: str | None,
     fallback_context: ConfigContext | None,
 ) -> ResolvedSettingsTarget:
-    if explicit_settings_target is not None:
-        return explicit_settings_target
-
     from_control = resolve_settings_target(control_settings_path)
     if from_control is not None:
         return from_control

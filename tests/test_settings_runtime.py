@@ -22,6 +22,7 @@ from fastapiex.settings import (
 )
 from fastapiex.settings import manager as manager_module
 from fastapiex.settings import registry as registry_module
+from fastapiex.settings import control_contract as control_contract_module
 from fastapiex.settings.manager import get_settings_manager
 from fastapiex.settings.source_contract import LoadedSource, SourceBinding, SourcePolicy, SourceSpec
 
@@ -54,7 +55,8 @@ def test_nested_sections_are_composed(tmp_path: Path) -> None:
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("father:\n  a: 7\n  son:\n    a: 9\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     assert GetSettings(target=FatherSettings, field="a") == 7
     assert GetSettings(target=SonSettings, field="a") == 9
@@ -72,7 +74,8 @@ def test_settingsmap_and_settings_read_same_map_section(tmp_path: Path) -> None:
         "services:\n  api:\n    host: 127.0.0.1\n    port: 8000\n  admin:\n    host: 127.0.0.2\n    port: 9000\n",
         encoding="utf-8",
     )
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     services = GetSettingsMap(target=ServiceSettings)
     assert services["api"].host == "127.0.0.1"
@@ -91,7 +94,8 @@ def test_settings_singleton_map_resolves_to_mapping_without_special_unwrap(tmp_p
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("services:\n  api:\n    host: localhost\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     services = GetSettings(target=ServiceSettings)
     assert isinstance(services, dict)
@@ -140,7 +144,8 @@ def test_basesettings_subclass_without_decorator_is_not_registered(tmp_path: Pat
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("{}\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     with pytest.raises(SettingsResolveError, match="did not match any declared section"):
         GetSettings(target=UndeclaredSettings)
@@ -182,7 +187,8 @@ def test_registration_allows_case_variant_section_names(tmp_path: Path) -> None:
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("APP:\n  name: upper\napp:\n  name: lower\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     # Type-target reads remain exact and do not become ambiguous in case-insensitive mode.
     assert GetSettings(target=UpperApp, field="name") == "upper"
@@ -200,7 +206,8 @@ def test_case_insensitive_path_lookup_is_ambiguous_for_case_variant_sections(tmp
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("APP:\n  name: upper\napp:\n  name: lower\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     with pytest.raises(SettingsResolveError):
         GetSettings(target="app", field="name")
@@ -216,7 +223,8 @@ def test_case_insensitive_map_lookup_is_ambiguous_for_case_variant_keys(tmp_path
         "services:\n  API:\n    host: upper\n  api:\n    host: lower\n",
         encoding="utf-8",
     )
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     with pytest.raises(SettingsResolveError):
         GetSettings(target="services.api", field="host")
@@ -234,7 +242,8 @@ def test_case_insensitive_env_override_applies_to_uppercase_declaration(
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("APP:\n  NAME: yaml\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     assert GetSettings(target=AppSettings, field="NAME") == "env-value"
     assert GetSettings(target="app", field="name") == "env-value"
@@ -311,7 +320,8 @@ def test_snapshot_control_env_prefix_reprojects_env_from_raw(
         "fastapiex:\n  settings:\n    env_prefix: ALT__\napp:\n  name: from-yaml\n",
         encoding="utf-8",
     )
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     manager = get_settings_manager()
     runtime_view = manager.inspect_runtime()
@@ -337,7 +347,8 @@ def test_case_sensitive_true_on_posix_allows_distinct_section_names(
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("APP:\n  name: upper\napp:\n  name: lower\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     assert GetSettings(target="APP", field="name") == "upper"
     assert GetSettings(target="app", field="name") == "lower"
@@ -363,7 +374,8 @@ def test_snapshot_control_case_sensitive_is_applied_before_env_projection(
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("fastapiex:\n  settings:\n    case_sensitive: true\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     assert GetSettings(target=UpperApp, field="name") == "upper"
     assert GetSettings(target=LowerApp, field="name") == "lower"
@@ -376,7 +388,7 @@ def test_case_sensitive_true_is_ignored_on_windows(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("FASTAPIEX__SETTINGS__CASE_SENSITIVE", "true")
-    monkeypatch.setattr(os, "name", "nt", raising=False)
+    monkeypatch.setattr(control_contract_module, "os", types.SimpleNamespace(name="nt"))
 
     caplog.set_level(logging.WARNING)
 
@@ -390,7 +402,8 @@ def test_case_sensitive_true_is_ignored_on_windows(
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("APP:\n  name: upper\napp:\n  name: lower\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    monkeypatch.chdir(tmp_path)
+    init_settings()
 
     assert GetSettings(target=UpperApp, field="name") == "upper"
     assert GetSettings(target=LowerApp, field="name") == "lower"
@@ -422,7 +435,8 @@ def test_invalid_registration_does_not_poison_registry(tmp_path: Path) -> None:
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("app:\n  name: ok\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
     assert GetSettings(target=AppSettings, field="name") == "ok"
 
 
@@ -441,7 +455,8 @@ def test_manual_reload_forces_source_reread(tmp_path: Path) -> None:
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("app:\n  name: v1\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     assert GetSettings(target=AppSettings, field="name") == "v1"
 
@@ -479,7 +494,7 @@ def test_snapshot_fastapiex_settings_path_can_switch_source_after_explicit_boots
     monkeypatch.setenv("FASTAPIEX__SETTINGS__PATH", str(env_file))
     init_settings(settings_path=bootstrap)
 
-    assert GetSettings(target=AppSettings, field="name") == "from-env"
+    assert GetSettings(target=AppSettings, field="name") == "from-bootstrap"
 
 
 def test_snapshot_fastapiex_settings_path_drives_runtime_source_switch(
@@ -503,7 +518,8 @@ def test_snapshot_fastapiex_settings_path_drives_runtime_source_switch(
         f'app:\n  name: second\nfastapiex:\n  settings:\n    path: "{second}"\n',
         encoding="utf-8",
     )
-    init_settings(settings_path=first)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(first)
+    init_settings()
 
     assert GetSettings(target=AppSettings, field="name") == "first"
 
@@ -527,7 +543,8 @@ def test_runtime_reload_mode_from_snapshot_is_not_affected_by_env_flip_after_ini
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("app:\n  name: v1\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
     assert GetSettings(target=AppSettings, field="name") == "v1"
 
     settings_file.write_text("app:\n  name: v2\n", encoding="utf-8")
@@ -553,7 +570,8 @@ def test_reload_mode_change_in_snapshot_takes_effect_without_manual_reload(tmp_p
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("fastapiex:\n  settings:\n    reload: always\napp:\n  name: v1\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
     assert GetSettings(target=AppSettings, field="name") == "v1"
 
     settings_file.write_text("fastapiex:\n  settings:\n    reload: off\napp:\n  name: v2\n", encoding="utf-8")
@@ -575,7 +593,8 @@ def test_reload_mode_off_in_snapshot_is_not_enabled_by_env_flip(
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("app:\n  name: v1\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
     assert GetSettings(target=AppSettings, field="name") == "v1"
 
     monkeypatch.setenv("FASTAPIEX__SETTINGS__RELOAD", "on_change")
@@ -602,7 +621,8 @@ def test_fastapiex_namespace_lookup_is_always_case_insensitive(
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("APP:\n  name: upper\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     assert GetSettings(target="FastAPIEx.Settings.Reload") is False
     assert GetSettings(target="FASTAPIEX.SETTINGS.CASE_SENSITIVE") is True
@@ -621,7 +641,8 @@ def test_fastapiex_namespace_with_mixed_case_yaml_keys_is_queryable(
         "FastAPIEx:\n  Settings:\n    Reload: always\napp:\n  name: value\n",
         encoding="utf-8",
     )
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     assert GetSettings(target="FASTAPIEX.SETTINGS.RELOAD") == "always"
     assert GetSettings(target=AppSettings, field="name") == "value"
@@ -642,7 +663,8 @@ def test_fastapiex_namespace_with_mixed_case_yaml_keys_stays_queryable_in_case_s
         "FastAPIEx:\n  Settings:\n    Reload: always\napp:\n  name: value\n",
         encoding="utf-8",
     )
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     assert GetSettings(target="FASTAPIEX.SETTINGS.RELOAD") == "always"
     assert GetSettings(target=AppSettings, field="name") == "value"
@@ -663,7 +685,8 @@ def test_nested_fastapiex_business_field_is_not_normalized_as_control_namespace(
         "app:\n  fastapiex:\n    TokenKey: Value\n",
         encoding="utf-8",
     )
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     payload = GetSettings(target=AppSettings, field="fastapiex")
     assert payload["TokenKey"] == "Value"
@@ -683,7 +706,8 @@ def test_lww_yaml_change_overrides_older_env_value(
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("app:\n  name: yaml-v1\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     assert GetSettings(target=AppSettings, field="name") == "env-v1"
 
@@ -704,7 +728,8 @@ def test_manual_reload_does_not_reingest_env_or_dotenv_sources(
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("app:\n  name: yaml-v1\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
     assert GetSettings(target=AppSettings, field="name") == "env-v1"
 
     settings_file.write_text("app:\n  name: yaml-v2\n", encoding="utf-8")
@@ -729,7 +754,8 @@ def test_dotenv_changes_are_not_watched_but_yaml_changes_are(
     settings_file.write_text("app:\n  name: yaml-v1\n", encoding="utf-8")
     dotenv_file = tmp_path / ".env"
     dotenv_file.write_text("TEST__APP__NAME=dotenv-v1\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     assert GetSettings(target=AppSettings, field="name") == "dotenv-v1"
 
@@ -754,7 +780,8 @@ def test_dotenv_source_can_enable_runtime_sync(
     settings_file.write_text("app:\n  name: yaml-v1\n", encoding="utf-8")
     dotenv_file = tmp_path / ".env"
     dotenv_file.write_text("TEST__APP__NAME=dotenv-v1\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
     assert GetSettings(target=AppSettings, field="name") == "dotenv-v1"
 
     dotenv_file.write_text("TEST__APP__NAME=dotenv-v2\n", encoding="utf-8")
@@ -825,7 +852,8 @@ def test_replacing_source_spec_rebinds_on_forced_full_refresh(tmp_path: Path) ->
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("app:\n  name: yaml\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
     reload_settings(reason="load-custom-a")
     assert GetSettings(target=AppSettings, field="name") == "('kind-a', 'a')"
 
@@ -883,7 +911,8 @@ def test_unregistered_source_is_pruned_from_runtime_snapshots(tmp_path: Path) ->
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("app:\n  name: yaml\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
     reload_settings(reason="load-ephemeral")
     assert GetSettings(target=AppSettings, field="name") == "ephemeral"
 
@@ -942,7 +971,8 @@ def test_custom_dotenv_source_spec_drives_auto_refresh(
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("app:\n  name: yaml\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     assert GetSettings(target=AppSettings, field="name") == "dotenv-v1"
 
@@ -977,7 +1007,8 @@ def test_custom_dotenv_source_spec_can_revert_to_builtin_loader(tmp_path: Path) 
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("app:\n  name: yaml\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
     reload_settings(reason="use-custom-dotenv")
     assert GetSettings(target=AppSettings, field="name") == "custom-v1"
 
@@ -1018,7 +1049,8 @@ def test_custom_yaml_loader_in_explicit_file_mode_uses_real_file_existence(tmp_p
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("app:\n  name: yaml\n", encoding="utf-8")
 
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
     assert GetSettings(target=AppSettings, field="name") == "custom"
 
 
@@ -1044,7 +1076,8 @@ def test_custom_yaml_loader_can_own_explicit_file_mode_without_local_file(tmp_pa
     )
 
     missing_file = tmp_path / "missing.yaml"
-    init_settings(settings_path=missing_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(missing_file)
+    init_settings()
     assert GetSettings(target=AppSettings, field="name") == "remote"
 
 
@@ -1075,7 +1108,8 @@ def test_dotenv_path_switch_sync_can_be_enabled_explicitly(
     )
     second_yaml.write_text("app:\n  name: second\n", encoding="utf-8")
 
-    init_settings(settings_path=first_yaml)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(first_yaml)
+    init_settings()
     assert GetSettings(target=AppSettings, field="name") == "first"
     assert GetSettings(target=AppSettings, field="token") == "token-first"
 
@@ -1108,7 +1142,8 @@ def test_getsettings_allows_mapping_category_injection_for_single_settingsmap(tm
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("services:\n  api:\n    host: localhost\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     services = GetSettings(target=dict)
     assert isinstance(services, dict)
@@ -1129,7 +1164,8 @@ def test_getsettings_mapping_category_injection_requires_unique_map_section(tmp_
         "services:\n  api:\n    host: localhost\ndatabases:\n  main:\n    url: sqlite:///main.db\n",
         encoding="utf-8",
     )
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     with pytest.raises(SettingsResolveError, match="matched multiple sections"):
         GetSettings(target=dict)
@@ -1145,7 +1181,8 @@ def test_getsettings_supports_generic_type_injection_when_unique(tmp_path: Path)
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("app:\n  name: demo\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     settings_obj = GetSettings(target=ConfigMarker)
     assert isinstance(settings_obj, AppSettings)
@@ -1169,7 +1206,8 @@ def test_getsettings_generic_type_injection_requires_unique_section(tmp_path: Pa
         "app:\n  name: api\nworker:\n  name: jobs\n",
         encoding="utf-8",
     )
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     with pytest.raises(SettingsResolveError, match="matched multiple sections"):
         GetSettings(target=SharedMarker)
@@ -1192,7 +1230,8 @@ def test_getsettings_generic_type_ambiguity_falls_back_to_default(tmp_path: Path
         "app:\n  name: api\nworker:\n  name: jobs\n",
         encoding="utf-8",
     )
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     default_obj = types.SimpleNamespace(name="fallback")
     assert GetSettings(target=SharedMarker, default=default_obj) is default_obj
@@ -1211,7 +1250,8 @@ def test_getsettings_generic_type_miss_falls_back_to_default(tmp_path: Path) -> 
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("app:\n  name: api\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     default_obj = types.SimpleNamespace(name="fallback")
     assert GetSettings(target=MissingMarker, default=default_obj) is default_obj
@@ -1227,7 +1267,8 @@ def test_getsettings_supports_generic_type_injection_for_singleton_map_item(tmp_
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("services:\n  api:\n    host: localhost\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     services = GetSettings(target=ServiceMarker)
     assert isinstance(services, dict)
@@ -1252,7 +1293,8 @@ def test_getsettings_can_read_intermediate_path_for_object_and_map_levels(tmp_pa
         "father:\n  a: 1\n  son:\n    grandson:\n      age: 7\n  services:\n    api:\n      host: 127.0.0.1\n",
         encoding="utf-8",
     )
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     son = GetSettings(target="father.son")
     assert son.grandson.age == 7
@@ -1274,7 +1316,8 @@ def test_manual_reload_restores_snapshot_after_monkeypatch(tmp_path: Path) -> No
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("fastapiex:\n  settings:\n    reload: off\napp:\n  name: stable\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     app = GetSettings(target=AppSettings)
     app.name = "patched"
@@ -1293,7 +1336,8 @@ def test_unrelated_module_changes_do_not_force_refresh_when_reload_off(
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("app:\n  name: v1\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     assert GetSettings(target=AppSettings, field="name") == "v1"
 
@@ -1324,7 +1368,8 @@ class DynSettings(BaseSettings):
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("dyn:\n  a: 5\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     assert GetSettings(target="dyn", field="a") == 5
 
@@ -1359,7 +1404,8 @@ class DynSettings(BaseSettings):
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("dyn:\n  a: 13\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
     assert GetSettings(target="dyn", field="a") == 13
 
     registry = registry_module.get_settings_registry()
@@ -1398,7 +1444,8 @@ class DynSettings(BaseSettings):
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("dyn:\n  a: 7\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     assert GetSettings(target="dyn", field="a") == 7
 
@@ -1427,7 +1474,8 @@ class DynSettings(BaseSettings):
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("{}\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
     assert GetSettings(target="dyn", field="a") == 1
 
     exec(
@@ -1461,7 +1509,8 @@ class DynSettings(BaseSettings):
 
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("dyn:\n  a: 11\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
     assert GetSettings(target="dyn", field="a") == 11
 
     sys.modules.pop(DYNAMIC_MODULE, None)
@@ -1474,7 +1523,8 @@ class DynSettings(BaseSettings):
 def test_cached_miss_is_invalidated_when_new_declaration_registers(tmp_path: Path) -> None:
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("{}\n", encoding="utf-8")
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     assert GetSettings(target="dyn", field="a", default=-1) == -1
 
@@ -1506,10 +1556,12 @@ def test_settings_source_is_process_global_and_singleton(tmp_path: Path) -> None
     file_b = tmp_path / "b.yaml"
     file_b.write_text("app:\n  name: b\n", encoding="utf-8")
 
-    init_settings(settings_path=file_a)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(file_a)
+    init_settings()
 
     with pytest.raises(RuntimeError, match="different source"):
-        init_settings(settings_path=file_b)
+        os.environ["FASTAPIEX__SETTINGS__PATH"] = str(file_b)
+        init_settings()
 
 
 def test_reload_true_startup_follows_multi_hop_settings_path_chain(
@@ -1522,7 +1574,7 @@ def test_reload_true_startup_follows_multi_hop_settings_path_chain(
     class AppSettings(BaseSettings):
         name: str
 
-    first = tmp_path / "first.yaml"
+    first = tmp_path / "settings.yaml"
     second = tmp_path / "second.yaml"
     third = tmp_path / "third.yaml"
 
@@ -1536,7 +1588,8 @@ def test_reload_true_startup_follows_multi_hop_settings_path_chain(
     )
     third.write_text("app:\n  name: third\n", encoding="utf-8")
 
-    init_settings(settings_path=first)
+    monkeypatch.chdir(tmp_path)
+    init_settings()
 
     manager = get_settings_manager()
     runtime_view = manager.inspect_runtime()
@@ -1566,7 +1619,8 @@ def test_reload_true_runtime_yaml_change_can_trigger_multi_hop_path_switch(
     )
     third.write_text("app:\n  name: third\n", encoding="utf-8")
 
-    init_settings(settings_path=first)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(first)
+    init_settings()
     assert GetSettings(target=AppSettings, field="name") == "first"
 
     first.write_text(
@@ -1602,7 +1656,8 @@ def test_fastapiex_controls_with_mixed_case_across_yaml_dotenv_env_follow_source
         encoding="utf-8",
     )
 
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
     assert GetSettings(target="FASTAPIEX.SETTINGS.RELOAD") is True
     assert GetSettings(target="fastapiex.settings.case_sensitive") is False
     assert GetSettings(target=AppSettings, field="name") == "yaml-v1"
@@ -1629,7 +1684,8 @@ def test_business_nested_fastapiex_path_remains_business_data_in_case_sensitive_
         "app:\n  fastapiex:\n    Settings:\n      TokenKey: Value\n",
         encoding="utf-8",
     )
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     assert GetSettings(target=AppSettings, field="fastapiex.Settings.TokenKey") == "Value"
     assert GetSettings(target="app.fastapiex.settings.tokenkey", default="miss") == "miss"
@@ -1652,7 +1708,8 @@ def test_case_insensitive_mode_handles_extreme_mixed_case_sections_fields_and_ma
         "cOrE:\n  aPp:\n    TiTlE: Demo\nmIxEd:\n  sErViCeS:\n    ApI:\n      HoSt: 127.0.0.1\n",
         encoding="utf-8",
     )
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     assert GetSettings(target="CORE.APP.TITLE") == "Demo"
     assert GetSettings(target=AppSettings, field="TITLE") == "Demo"
@@ -1689,7 +1746,8 @@ def test_case_sensitive_mode_distinguishes_business_key_variants_but_controls_st
         "Services:\n  API:\n    host: upper-host\n  api:\n    host: lower-host\n",
         encoding="utf-8",
     )
-    init_settings(settings_path=settings_file)
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
 
     assert GetSettings(target="App", field="name") == "mixed"
     assert GetSettings(target="APP", field="name") == "upper"
@@ -1767,7 +1825,8 @@ def test_combined_extreme_controls_path_hops_and_business_fastapiex_collision(
         encoding="utf-8",
     )
 
-    init_settings(settings_path=first)
+    monkeypatch.chdir(hop1)
+    init_settings()
     assert GetSettings(target=AppSettings, field="name") == "hop3"
     assert GetSettings(target="app.fastapiex.inner.token") == "gamma"
     assert GetSettings(target="services.api.host") == "hop3-host"
@@ -1798,7 +1857,7 @@ def test_reload_true_with_settings_path_cycle_warns_and_stops_at_current_source(
     class AppSettings(BaseSettings):
         name: str
 
-    first = tmp_path / "first.yaml"
+    first = tmp_path / "settings.yaml"
     second = tmp_path / "second.yaml"
     first.write_text(
         f'fastapiex:\n  settings:\n    path: "{second}"\napp:\n  name: first\n',
@@ -1809,13 +1868,14 @@ def test_reload_true_with_settings_path_cycle_warns_and_stops_at_current_source(
         encoding="utf-8",
     )
 
-    init_settings(settings_path=first)
+    monkeypatch.chdir(tmp_path)
+    init_settings()
 
     manager = get_settings_manager()
     runtime_view = manager.inspect_runtime()
     assert runtime_view is not None
-    assert runtime_view.context.settings_path == second
-    assert GetSettings(target=AppSettings, field="name") == "second"
+    assert runtime_view.context.settings_path == first
+    assert GetSettings(target=AppSettings, field="name") == "first"
 
     warning_messages = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
     assert any("path control cycle detected" in message for message in warning_messages)
@@ -1834,7 +1894,7 @@ def test_path_cycle_detection_keys_by_settings_path_not_entire_source(
     class AppSettings(BaseSettings):
         name: str
 
-    first = tmp_path / "first.yaml"
+    first = tmp_path / "settings.yaml"
     second = tmp_path / "second.yaml"
     first.write_text(
         f'fastapiex:\n  settings:\n    path: "{second}"\napp:\n  name: first\n',
@@ -1845,13 +1905,14 @@ def test_path_cycle_detection_keys_by_settings_path_not_entire_source(
         encoding="utf-8",
     )
 
-    init_settings(settings_path=first, env_prefix="TEST__")
+    monkeypatch.chdir(tmp_path)
+    init_settings()
 
     manager = get_settings_manager()
     runtime_view = manager.inspect_runtime()
     assert runtime_view is not None
-    assert runtime_view.context.settings_path == second
-    assert GetSettings(target=AppSettings, field="name") == "second"
+    assert runtime_view.context.settings_path == first
+    assert GetSettings(target=AppSettings, field="name") == "first"
 
     warning_messages = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
     assert any("path control cycle detected" in message for message in warning_messages)

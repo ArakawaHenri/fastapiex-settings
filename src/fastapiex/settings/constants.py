@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .types import ReloadMode, SourceName
+from .types import ReloadMode
 
 # control defaults
 DEFAULT_ENV_PREFIX = ""
@@ -23,18 +23,6 @@ RELOAD_MODE_ALWAYS_TOKENS = frozenset({"always"})
 RELOAD_MODE_ON_CHANGE_TOKENS = frozenset({"on_change", "on-change", "onchange", "true", "1", "yes"})
 RELOAD_MODE_OFF_TOKENS = frozenset({"off", "false", "0", "no"})
 
-# source priority and order
-SOURCE_PRIORITY: dict[SourceName, int] = {
-    "yaml": 1,
-    "dotenv": 2,
-    "env": 3,
-}
-SOURCE_ORDER: tuple[SourceName, ...] = (
-    "yaml",
-    "dotenv",
-    "env",
-)
-
 __all__ = [
     "DEFAULT_ENV_PREFIX",
     "DEFAULT_CASE_SENSITIVE",
@@ -48,7 +36,5 @@ __all__ = [
     "RELOAD_MODE_OFF_TOKENS",
     "RELOAD_MODE_ON_CHANGE_TOKENS",
     "SETTINGS_FILENAME",
-    "SOURCE_ORDER",
-    "SOURCE_PRIORITY",
     "TRUE_TEXT_VALUES",
 ]
