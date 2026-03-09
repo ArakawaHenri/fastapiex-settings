@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -39,7 +39,7 @@ def evaluate_request(
     *,
     request: ResolveRequest,
     settings: BaseModel,
-    sections: list[SectionSpec],
+    sections: Sequence[SectionSpec],
     case_sensitive: bool,
 ) -> Any:
     value = resolve_target_value(
@@ -65,7 +65,7 @@ def resolve_target_value(
     *,
     target: str | type[object] | None,
     settings: BaseModel,
-    sections: list[SectionSpec],
+    sections: Sequence[SectionSpec],
     case_sensitive: bool,
 ) -> Any:
     if target is None:
@@ -87,7 +87,7 @@ def resolve_target_value(
 def resolve_type_target(
     *,
     target_type: type[object],
-    sections: list[SectionSpec],
+    sections: Sequence[SectionSpec],
 ) -> SectionSpec:
     target_name = f"{target_type.__module__}.{target_type.__qualname__}"
     candidates = [section for section in sections if section_matches_target_type(section, target_type)]
@@ -142,6 +142,7 @@ def section_matches_target_type(section: SectionSpec, target_type: type[object])
     else:
         candidate_types = (section.model,)
     return any(_issubclass_safe(candidate, target_type) for candidate in candidate_types)
+
 
 def _split_lookup_path(path: str) -> tuple[str, ...]:
     parts = [part.strip() for part in path.split(".")]

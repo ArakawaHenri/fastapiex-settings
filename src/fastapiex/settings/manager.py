@@ -260,7 +260,7 @@ class SettingsManager:
 
     def _mark_missing_cache(self, cache_key: str) -> None:
         with self._lock:
-            self._missing_cache[cache_key] = get_settings_registry().version()
+            self._missing_cache[cache_key] = get_settings_registry().snapshot().version
 
     def _finalize_resolve_failure(
         self,
@@ -282,12 +282,13 @@ class SettingsManager:
         raise SettingsResolveError("settings value could not be resolved")
 
     def _evaluate_request_locked(self, request: ResolveRequest) -> Any:
+        registry_snapshot = get_settings_registry().snapshot()
         settings = self._active_settings_locked()
         context = self._active_context_locked()
         return evaluate_request(
             request=request,
             settings=settings,
-            sections=get_settings_registry().sections(),
+            sections=registry_snapshot.sections,
             case_sensitive=context.case_sensitive,
         )
 
@@ -296,7 +297,7 @@ class SettingsManager:
             marker = self._missing_cache.get(cache_key)
             if marker is None:
                 return False
-            current = get_settings_registry().version()
+            current = get_settings_registry().snapshot().version
             return marker == current
 
     def _warn_validation_fallback_once_locked(
@@ -375,7 +376,7 @@ class SettingsManager:
         return changed
 
     def _is_schema_outdated_locked(self) -> bool:
-        return self._schema is None or get_settings_registry().version() != self._registry_version
+        return self._schema is None or get_settings_registry().snapshot().version != self._registry_version
 
     def _commit_candidate_locked(
         self,
@@ -449,10 +450,10 @@ class SettingsManager:
             raise SettingsValidationError(str(exc)) from exc
 
     def _ensure_schema_locked(self) -> BuiltSchema:
-        registry_version = get_settings_registry().version()
-        if self._schema is None or registry_version != self._registry_version:
-            self._schema = build_root_settings_model(get_settings_registry().sections())
-            self._registry_version = registry_version
+        registry_snapshot = get_settings_registry().snapshot()
+        if self._schema is None or registry_snapshot.version != self._registry_version:
+            self._schema = build_root_settings_model(registry_snapshot.sections)
+            self._registry_version = registry_snapshot.version
         return self._active_schema_locked()
 
     def _resolve_context(self) -> ConfigContext:

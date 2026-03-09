@@ -138,6 +138,46 @@ def test_declaration_decorators_reject_invalid_arguments() -> None:
         SettingsMap(Plain)  # type: ignore[arg-type]
 
 
+def test_settings_decorator_does_not_write_implicit_section_attribute() -> None:
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str = "demo"
+
+    assert "__section__" not in AppSettings.__dict__
+
+
+def test_settings_uses_local_section_attribute_only() -> None:
+    class ParentSettings(BaseSettings):
+        __section__ = "parent.section"
+
+    @Settings
+    class ChildSettings(ParentSettings):
+        enabled: bool = True
+
+    section = next(spec for spec in registry_module.get_settings_registry().sections() if spec.model is ChildSettings)
+    assert section.raw_path == "child_settings"
+
+
+def test_explicit_settings_path_overrides_local_section_attribute() -> None:
+    @Settings("runtime.app")
+    class AppSettings(BaseSettings):
+        __section__ = "ignored.local"
+        name: str = "demo"
+
+    section = next(spec for spec in registry_module.get_settings_registry().sections() if spec.model is AppSettings)
+    assert section.raw_path == "runtime.app"
+
+
+def test_settings_without_path_uses_local_section_attribute() -> None:
+    @Settings
+    class AppSettings(BaseSettings):
+        __section__ = "runtime.local"
+        name: str = "demo"
+
+    section = next(spec for spec in registry_module.get_settings_registry().sections() if spec.model is AppSettings)
+    assert section.raw_path == "runtime.local"
+
+
 def test_basesettings_subclass_without_decorator_is_not_registered(tmp_path: Path) -> None:
     class UndeclaredSettings(BaseSettings):
         value: int = 1

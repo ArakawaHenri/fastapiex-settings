@@ -4,7 +4,8 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel
 
-from .pathing import resolve_section_name, split_dotted_path
+from .name_resolver import resolve_declared_path
+from .pathing import split_dotted_path
 from .types import SectionKind
 
 
@@ -39,7 +40,7 @@ def describe_section(
     kind: SectionKind,
     explicit: str | None = None,
 ) -> SectionSpec:
-    raw_path = resolve_section_name(model, explicit)
+    raw_path = resolve_declared_path(model, explicit)
     return SectionSpec(
         model=model,
         kind=kind,

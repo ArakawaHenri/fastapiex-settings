@@ -1,27 +1,19 @@
 from __future__ import annotations
 
-import sys
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
-from types import ModuleType
 from typing import TypeVar, overload
 
 from pydantic import BaseModel
 
 from .control_contract import CONTROL_SPEC
+from .declaration_contract import Declaration, RegistrySnapshot
 from .exceptions import SettingsRegistrationError
+from .lifecycle import build_declaration_owner, is_declaration_live
 from .specs import SectionSpec, describe_section
 from .types import SectionKind
 
 _ModelClassT = TypeVar("_ModelClassT", bound=type[BaseModel])
-
-
-@dataclass(frozen=True, slots=True)
-class _SectionRecord:
-    spec: SectionSpec
-    owner_module: str
-    owner_identity: int
 
 
 def build_section_spec(
@@ -46,8 +38,9 @@ class SettingsRegistry:
     """Process-global declaration registry with owner-based lifecycle."""
 
     def __init__(self) -> None:
-        self._records_by_model: dict[type[BaseModel], _SectionRecord] = {}
+        self._declarations_by_model: dict[type[BaseModel], Declaration] = {}
         self._sections_by_path: dict[tuple[str, ...], SectionSpec] = {}
+        self._ordered_sections: tuple[SectionSpec, ...] = ()
         self._version = 0
         self._lock = threading.RLock()
 
@@ -56,7 +49,6 @@ class SettingsRegistry:
         *,
         spec: SectionSpec,
         owner_module: str,
-        owner_identity: int,
     ) -> None:
         with self._lock:
             kind = spec.kind
@@ -67,91 +59,69 @@ class SettingsRegistry:
             if kind not in {"object", "map"}:
                 raise SettingsRegistrationError(f"unsupported section kind: {kind!r}")
 
-            previous_records = dict(self._records_by_model)
+            previous_declarations = dict(self._declarations_by_model)
             previous_sections = self._sections_by_path
+            previous_ordered_sections = self._ordered_sections
             previous_version = self._version
 
             try:
-                changed = False
-
-                for existing_model, existing_record in list(self._records_by_model.items()):
-                    if existing_record.owner_module != owner_module:
-                        continue
-                    if existing_record.owner_identity == owner_identity:
-                        continue
-                    del self._records_by_model[existing_model]
-                    changed = True
-
-                changed = self._drop_stale_records_for_owner_locked(
+                changed = self._drop_stale_declarations_for_owner_locked(owner_module=owner_module)
+                changed = self._drop_redefined_declarations_for_owner_locked(
                     owner_module=owner_module,
-                    owner_identity=owner_identity,
+                    model=model,
+                    spec=spec,
                 ) or changed
 
-                # Allow in-place class redefinition in the same module identity
-                # when the section path and class name are unchanged.
-                for existing_model, existing_record in list(self._records_by_model.items()):
-                    if existing_record.owner_module != owner_module:
-                        continue
-                    if existing_record.owner_identity != owner_identity:
-                        continue
-                    if existing_model is model:
-                        continue
-                    if existing_record.spec.path != spec.path:
-                        continue
-                    if existing_model.__name__ != model.__name__:
-                        continue
-                    del self._records_by_model[existing_model]
-                    changed = True
-
-                existing = self._records_by_model.get(model)
-                candidate = _SectionRecord(
+                existing = self._declarations_by_model.get(model)
+                candidate = Declaration(
                     spec=spec,
-                    owner_module=owner_module,
-                    owner_identity=owner_identity,
+                    owner=build_declaration_owner(owner_module),
                 )
                 if existing == candidate:
                     if changed:
                         self._reindex_locked()
                     return
 
-                self._records_by_model[model] = candidate
+                self._declarations_by_model[model] = candidate
                 self._reindex_locked()
             except SettingsRegistrationError:
-                self._records_by_model = previous_records
+                self._declarations_by_model = previous_declarations
                 self._sections_by_path = previous_sections
+                self._ordered_sections = previous_ordered_sections
                 self._version = previous_version
                 raise
 
     def reconcile_runtime_modules(self) -> bool:
         with self._lock:
             changed = False
-            for model, record in list(self._records_by_model.items()):
-                if self._record_is_live_locked(model=model, record=record):
+            for model, declaration in list(self._declarations_by_model.items()):
+                if self._record_is_live_locked(model=model, record=declaration):
                     continue
-                del self._records_by_model[model]
+                del self._declarations_by_model[model]
                 changed = True
 
             if changed:
                 self._reindex_locked()
             return changed
 
-    def unregister_owner(self, owner_module: str, *, owner_identity: int | None = None) -> None:
+    def unregister_owner(self, owner_module: str) -> None:
         with self._lock:
             removed = False
-            for model, record in list(self._records_by_model.items()):
-                if record.owner_module != owner_module:
+            for model, declaration in list(self._declarations_by_model.items()):
+                if declaration.owner.module_name != owner_module:
                     continue
-                if owner_identity is not None and record.owner_identity != owner_identity:
-                    continue
-                del self._records_by_model[model]
+                del self._declarations_by_model[model]
                 removed = True
 
             if removed:
                 self._reindex_locked()
 
-    def sections(self) -> list[SectionSpec]:
+    def snapshot(self) -> RegistrySnapshot:
         with self._lock:
-            return [self._sections_by_path[key] for key in sorted(self._sections_by_path)]
+            return RegistrySnapshot(version=self._version, sections=self._ordered_sections)
+
+    def sections(self) -> list[SectionSpec]:
+        return list(self.snapshot().sections)
 
     def version(self) -> int:
         with self._lock:
@@ -160,8 +130,8 @@ class SettingsRegistry:
     def _reindex_locked(self) -> None:
         new_sections: dict[tuple[str, ...], SectionSpec] = {}
 
-        for record in self._records_by_model.values():
-            section = record.spec
+        for declaration in self._declarations_by_model.values():
+            section = declaration.spec
             existing = new_sections.get(section.path)
             if existing is not None and existing.model is not section.model:
                 raise SettingsRegistrationError(
@@ -172,36 +142,44 @@ class SettingsRegistry:
             new_sections[section.path] = section
 
         self._sections_by_path = new_sections
+        self._ordered_sections = tuple(new_sections[key] for key in sorted(new_sections))
         self._version += 1
 
-    def _drop_stale_records_for_owner_locked(self, *, owner_module: str, owner_identity: int) -> bool:
+    def _drop_stale_declarations_for_owner_locked(self, *, owner_module: str) -> bool:
         removed = False
-        for model, record in list(self._records_by_model.items()):
-            if record.owner_module != owner_module:
+        for model, declaration in list(self._declarations_by_model.items()):
+            if declaration.owner.module_name != owner_module:
                 continue
-            if record.owner_identity != owner_identity:
+            if self._record_is_live_locked(model=model, record=declaration):
                 continue
-            if self._record_is_live_locked(model=model, record=record):
+            del self._declarations_by_model[model]
+            removed = True
+        return removed
+
+    def _drop_redefined_declarations_for_owner_locked(
+        self,
+        *,
+        owner_module: str,
+        model: type[BaseModel],
+        spec: SectionSpec,
+    ) -> bool:
+        removed = False
+        for existing_model, declaration in list(self._declarations_by_model.items()):
+            if declaration.owner.module_name != owner_module:
                 continue
-            del self._records_by_model[model]
+            if existing_model is model:
+                continue
+            if declaration.spec.path != spec.path:
+                continue
+            if existing_model.__name__ != model.__name__:
+                continue
+            del self._declarations_by_model[existing_model]
             removed = True
         return removed
 
     @staticmethod
-    def _record_is_live_locked(*, model: type[BaseModel], record: _SectionRecord) -> bool:
-        module = sys.modules.get(record.owner_module)
-        if not isinstance(module, ModuleType):
-            return False
-        if id(module) != record.owner_identity:
-            return False
-
-        if "<locals>" in model.__qualname__:
-            return True
-
-        namespace = getattr(module, "__dict__", None)
-        if not isinstance(namespace, dict):
-            return False
-        return namespace.get(model.__name__) is model
+    def _record_is_live_locked(*, model: type[BaseModel], record: Declaration) -> bool:
+        return is_declaration_live(model=model, declaration=record)
 
 
 _GLOBAL_REGISTRY = SettingsRegistry()
@@ -209,13 +187,6 @@ _GLOBAL_REGISTRY = SettingsRegistry()
 
 def get_settings_registry() -> SettingsRegistry:
     return _GLOBAL_REGISTRY
-
-
-def _module_identity(module_name: str) -> int:
-    module = sys.modules.get(module_name)
-    if module is None:
-        return -1
-    return id(module)
 
 
 def _register_declared_model(
@@ -229,15 +200,10 @@ def _register_declared_model(
 
     spec = build_section_spec(model=cls, kind=kind, raw_path=section)
 
-    cls.__section__ = spec.raw_path  # type: ignore[attr-defined]
-    cls.__fastapiex_settings_model__ = True  # type: ignore[attr-defined]
-    cls.__fastapiex_settings_is_map__ = kind == "map"  # type: ignore[attr-defined]
-
     registry = get_settings_registry()
     registry.register_section(
         spec=spec,
         owner_module=cls.__module__,
-        owner_identity=_module_identity(cls.__module__),
     )
     return cls
 

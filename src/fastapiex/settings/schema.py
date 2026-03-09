@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -24,12 +25,13 @@ class _TreeNode:
 
 
 def build_root_settings_model(
-    sections: list[SectionSpec],
+    sections: Sequence[SectionSpec],
     *,
     model_name: str = "FastAPIExRootSettings",
 ) -> BuiltSchema:
+    ordered_sections = tuple(sorted(sections, key=lambda item: item.path))
     root = _TreeNode(name="__root__")
-    for section in sorted(sections, key=lambda item: item.path):
+    for section in ordered_sections:
         _insert_section(root, section)
 
     field_defs: dict[str, tuple[Any, Any]] = {}
@@ -49,7 +51,7 @@ def build_root_settings_model(
         base_model=BaseModel,
         field_defs=field_defs,
     )
-    return BuiltSchema(root_model=root_model, sections=tuple(sorted(sections, key=lambda item: item.path)))
+    return BuiltSchema(root_model=root_model, sections=ordered_sections)
 
 
 def _insert_section(root: _TreeNode, section: SectionSpec) -> None:

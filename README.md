@@ -89,7 +89,7 @@ Role:
 Section name resolution order:
 
 1. explicit decorator path
-2. model `__section__` if non-empty
+2. model-local `__section__` if non-empty (`__dict__` only, inherited `__section__` is ignored)
 3. snake_case class name
 
 Accepted forms:
@@ -97,6 +97,10 @@ Accepted forms:
 - `@Settings`
 - `@Settings("father.son")`
 - `Settings(MyModel)` (functional form)
+
+Notes:
+
+- Decorators do not write implicit metadata back to model classes (for example, they do not set `__section__`).
 
 ### `SettingsMap`
 
