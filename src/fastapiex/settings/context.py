@@ -39,13 +39,15 @@ def resolve_settings_target(
 
     if isinstance(raw, Path):
         path = raw.expanduser()
+        requested_directory = False
     else:
         text = raw.strip()
         if not text:
             return None
         path = Path(text).expanduser()
+        requested_directory = text.endswith(("/", "\\"))
 
-    if as_directory:
+    if as_directory or requested_directory:
         anchor_dir = path.resolve()
         return ResolvedSettingsTarget(
             settings_path=(anchor_dir / SETTINGS_FILENAME).resolve(),
@@ -53,7 +55,23 @@ def resolve_settings_target(
             path_mode="directory_anchor",
         )
 
-    if path.suffix.lower() in {".yaml", ".yml"}:
+    if path.exists():
+        if path.is_dir():
+            anchor_dir = path.resolve()
+            return ResolvedSettingsTarget(
+                settings_path=(anchor_dir / SETTINGS_FILENAME).resolve(),
+                anchor_dir=anchor_dir,
+                path_mode="directory_anchor",
+            )
+
+        resolved = path.resolve()
+        return ResolvedSettingsTarget(
+            settings_path=resolved,
+            anchor_dir=resolved.parent,
+            path_mode="explicit_file",
+        )
+
+    if path.suffix:
         resolved = path.resolve()
         return ResolvedSettingsTarget(
             settings_path=resolved,

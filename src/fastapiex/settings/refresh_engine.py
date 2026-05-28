@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .context import ConfigContext
+from .exceptions import SettingsValidationError
 from .live_config import EntrySource, build_entries_from_mappings
 from .projection import materialize_control_snapshot
 from .runtime_state import SourceSnapshot
@@ -119,9 +120,14 @@ def refresh_snapshot_set(
 
     next_snapshots: dict[str, SourceSnapshot] = {}
     changed_snapshots: list[tuple[SourceSpec, SourceSnapshot]] = []
+    removed_snapshot = False
 
     for spec in sources.ordered():
         previous = current.get(spec.name)
+        if not source_supports_context(spec, context):
+            removed_snapshot = removed_snapshot or previous is not None
+            continue
+
         binding = (
             previous.binding
             if previous is not None and not spec.policy.follow_context and mode != "full"
@@ -164,7 +170,7 @@ def refresh_snapshot_set(
             payload=snapshot.payload,
         )
 
-    return next_snapshots, next_last_rev, bool(changed_snapshots)
+    return next_snapshots, next_last_rev, bool(changed_snapshots) or removed_snapshot
 
 
 def build_entries_from_runtime_snapshots(
@@ -196,12 +202,37 @@ def validate_final_source_bindings(
     snapshots: Mapping[str, SourceSnapshot],
     sources: SourceRegistry,
 ) -> None:
+    config_sources = tuple(spec for spec in sources.ordered() if spec.role == "config_file")
+    active_config_sources = tuple(spec for spec in config_sources if source_supports_context(spec, context))
+    if context.path_mode == "explicit_file" and config_sources and not active_config_sources:
+        raise SettingsValidationError(_unsupported_explicit_file_message(context, config_sources))
+
     for spec in sources.ordered():
+        if not source_supports_context(spec, context):
+            continue
         if spec.validate_final_binding is None:
             continue
         snapshot = snapshots.get(spec.name)
         binding = spec.bind(context) if snapshot is None else snapshot.binding
         spec.validate_final_binding(context, binding)
+
+
+def source_supports_context(spec: SourceSpec, context: ConfigContext) -> bool:
+    if spec.supports_context is None:
+        return True
+    return spec.supports_context(context)
+
+
+def _unsupported_explicit_file_message(
+    context: ConfigContext,
+    config_sources: tuple[SourceSpec, ...],
+) -> str:
+    extension = context.settings_path.suffix.lower() or "<none>"
+    source_names = ", ".join(spec.name for spec in config_sources)
+    return (
+        f"unsupported explicit settings file extension {extension!r}: {context.settings_path}. "
+        f"No registered config source supports this target. Config sources: {source_names}"
+    )
 
 
 def _should_load_source(
