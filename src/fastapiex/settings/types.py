@@ -6,6 +6,7 @@ ReloadMode = Literal["off", "on_change", "always"]
 ResolveAPI = Literal["settings", "map"]
 SectionKind = Literal["object", "map"]
 ProjectionKind = Literal["mapping", "env_like"]
+SourceRole = Literal["ambient", "config_file"]
 SourceName: TypeAlias = str
 SettingsPathMode = Literal["explicit_file", "directory_anchor"]
 SourceState: TypeAlias = tuple[str, bool, int, int] | None
@@ -21,6 +22,7 @@ __all__ = [
     "SettingsPathMode",
     "SourceDescriptor",
     "SourceName",
+    "SourceRole",
     "SourceState",
     "SourceSyncMode",
     "SourceToken",

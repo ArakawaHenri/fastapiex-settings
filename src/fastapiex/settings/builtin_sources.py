@@ -13,6 +13,8 @@ from .loader import (
 )
 from .source_contract import LoadedSource, SourceBinding, SourcePolicy, SourceSpec
 
+_YAML_EXTENSIONS = frozenset({".yaml", ".yml"})
+
 
 def builtin_source_specs() -> tuple[SourceSpec, ...]:
     return (
@@ -29,6 +31,8 @@ def builtin_source_specs() -> tuple[SourceSpec, ...]:
             probe=_probe_file_binding,
             load=_load_yaml_source,
             validate_final_binding=_validate_yaml_explicit_file,
+            role="config_file",
+            supports_context=_supports_yaml_context,
         ),
         SourceSpec(
             name="dotenv",
@@ -61,6 +65,12 @@ def builtin_source_specs() -> tuple[SourceSpec, ...]:
 
 def _bind_yaml(context: ConfigContext) -> SourceBinding:
     return SourceBinding(source="yaml", descriptor=context.settings_path)
+
+
+def _supports_yaml_context(context: ConfigContext) -> bool:
+    if context.path_mode == "directory_anchor":
+        return True
+    return context.settings_path.suffix.lower() in _YAML_EXTENSIONS
 
 
 def _bind_dotenv(context: ConfigContext) -> SourceBinding:

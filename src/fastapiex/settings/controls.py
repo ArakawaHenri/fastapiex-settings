@@ -42,6 +42,7 @@ def _extract_control_mapping(
         merge_nested_mapping(merged, normalize_control_mapping(candidate))
     return merged
 
+
 def build_env_controls_snapshot() -> Mapping[Any, Any]:
     return load_env_overrides(prefix="", case_sensitive=False)
 
