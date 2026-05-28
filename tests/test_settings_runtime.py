@@ -1485,6 +1485,73 @@ def test_unrelated_module_changes_do_not_force_refresh_when_reload_off(
         sys.modules.pop(dynamic_name, None)
 
 
+def test_dynamic_declaration_preserves_live_patch_when_reload_off(tmp_path: Path) -> None:
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("app:\n  name: stable\ndyn:\n  value: 2\n", encoding="utf-8")
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
+
+    app = GetSettings(target=AppSettings)
+    app.name = "patched"
+    assert GetSettings(target=AppSettings, field="name") == "patched"
+
+    module = types.ModuleType(DYNAMIC_MODULE)
+    sys.modules[DYNAMIC_MODULE] = module
+    try:
+        exec(
+            """
+from fastapiex.settings import BaseSettings, Settings
+
+@Settings("dyn")
+class DynSettings(BaseSettings):
+    value: int
+""",
+            module.__dict__,
+        )
+
+        assert GetSettings(target="dyn", field="value") == 2
+        assert GetSettings(target=AppSettings, field="name") == "patched"
+    finally:
+        sys.modules.pop(DYNAMIC_MODULE, None)
+
+
+def test_nested_dynamic_declaration_preserves_parent_live_patch_when_reload_off(tmp_path: Path) -> None:
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("app:\n  name: stable\n  feature:\n    enabled: true\n", encoding="utf-8")
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+    init_settings()
+
+    app = GetSettings(target=AppSettings)
+    app.name = "patched"
+
+    module = types.ModuleType(DYNAMIC_MODULE)
+    sys.modules[DYNAMIC_MODULE] = module
+    try:
+        exec(
+            """
+from fastapiex.settings import BaseSettings, Settings
+
+@Settings("app.feature")
+class FeatureSettings(BaseSettings):
+    enabled: bool
+""",
+            module.__dict__,
+        )
+
+        assert GetSettings(target="app.feature", field="enabled") is True
+        assert GetSettings(target=AppSettings, field="name") == "patched"
+    finally:
+        sys.modules.pop(DYNAMIC_MODULE, None)
+
+
 def test_module_lifecycle_removes_stale_section_after_module_replacement(tmp_path: Path) -> None:
     module_v1 = types.ModuleType(DYNAMIC_MODULE)
     sys.modules[DYNAMIC_MODULE] = module_v1

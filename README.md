@@ -357,6 +357,8 @@ Recommended safety flow when manually patching settings at runtime:
 
 - before monkeypatching, set `FastAPIEx.settings.reload` (`fastapiex.settings.reload`) to `off`.
 - perform the manual mutation.
+- dynamic imports may still register new settings declarations; when no source reload occurs, those schema-only updates
+  preserve existing live values and only hydrate newly declared or redefined paths from the current raw snapshots.
 - when done and you want to restore canonical values from configured sources, call `reload_settings(reason="...")`.
 
 ### Runtime Controls (`FASTAPIEX__*`)
@@ -421,7 +423,8 @@ Behavior:
 - `off`: no auto yaml sync.
 - `on_change`: sync yaml when file state changes.
 - `always`: sync yaml on each read.
-- module delta changes still trigger declaration rediscovery/snapshot rebuild.
+- module delta changes still trigger declaration rediscovery and schema rebuild.
+- schema-only rebuilds preserve existing live values when no source snapshot changed.
 - runtime controls are resolved from current live snapshot (not direct env re-read).
 
 ## Intentionally Not Public at Package Root

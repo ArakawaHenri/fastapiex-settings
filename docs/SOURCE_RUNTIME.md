@@ -72,6 +72,11 @@ One refresh always follows the same flow:
 
 No partial state is published.
 
+Schema-only changes, such as a dynamically imported module registering a new `@Settings` declaration while no source
+snapshot changed, use an incremental commit path. Existing live values remain the base payload; only newly declared or
+redefined section paths are hydrated from the current raw snapshots or model defaults. Manual `reload_settings()` and
+actual source snapshot changes still rebuild from raw snapshots and restore canonical source values.
+
 ## Path Semantics
 
 `settings.path` has only two meanings:
@@ -151,5 +156,7 @@ The old parameterized sync API is intentionally removed.
 
 - A committed runtime always has a single stable context.
 - A committed runtime never mixes old and new snapshots within one transaction.
+- Schema-only commits must not turn unchanged source snapshots back into authoritative values for unchanged live
+  sections.
 - Source-specific path / existence / descriptor rules belong to the source spec.
 - The manager should stay agnostic to individual source implementations.
