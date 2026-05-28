@@ -108,8 +108,9 @@ class SettingsControls(CoreSettings):
         return _parse_reload_mode(value)
 
 
-class Fastapiex(CoreSettings):
+class FastAPIEx(CoreSettings):
     model_config = ConfigDict(extra="ignore")
+    __section__ = "fastapiex"
 
     settings: SettingsControls = Field(default_factory=SettingsControls)
     base_dir: str | None = None
@@ -120,7 +121,7 @@ class Fastapiex(CoreSettings):
         return _normalize_optional_str(value)
 
 
-ControlModel: TypeAlias = Fastapiex
+ControlModel: TypeAlias = FastAPIEx
 
 CONTROL_SPEC: SectionSpec = ControlModel.section_spec()
 CONTROL_ROOT = CONTROL_SPEC.root
@@ -146,7 +147,7 @@ __all__ = [
     "CONTROL_ROOT",
     "CONTROL_SPEC",
     "ControlModel",
-    "Fastapiex",
+    "FastAPIEx",
     "SETTINGS_PATH_ENV_KEY",
     "SETTINGS_ENV_PREFIX_ENV_KEY",
     "SettingsControls",

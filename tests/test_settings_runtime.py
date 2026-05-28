@@ -28,6 +28,7 @@ from fastapiex.settings.source_contract import LoadedSource, SourceBinding, Sour
 
 SettingsRegistrationError = exceptions.SettingsRegistrationError
 SettingsResolveError = exceptions.SettingsResolveError
+SettingsValidationError = exceptions.SettingsValidationError
 
 DYNAMIC_MODULE = "tests.dynamic_settings_runtime"
 
@@ -304,6 +305,21 @@ def test_prefixed_settings_path_env_is_used_for_implicit_init(
     assert GetSettings(target=AppSettings, field="name") == "from-env-path"
 
 
+def test_prefixed_settings_path_env_accepts_directory_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("app:\n  name: from-path-directory\n", encoding="utf-8")
+    monkeypatch.setenv("FASTAPIEX__SETTINGS__PATH", str(tmp_path))
+
+    assert GetSettings(target=AppSettings, field="name") == "from-path-directory"
+
+
 def test_implicit_init_applies_runtime_controls_from_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -328,7 +344,7 @@ def test_implicit_init_applies_runtime_controls_from_snapshot(
     assert GetSettings(target=AppSettings, field="name") == "v2"
 
 
-def test_prefixed_base_dir_env_is_used_for_implicit_init(
+def test_prefixed_base_dir_env_is_used_as_first_fallback_for_implicit_init(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -341,6 +357,27 @@ def test_prefixed_base_dir_env_is_used_for_implicit_init(
     monkeypatch.setenv("FASTAPIEX__BASE_DIR", str(tmp_path))
 
     assert GetSettings(target=AppSettings, field="name") == "from-base-dir"
+
+
+def test_settings_path_wins_over_base_dir_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str
+
+    legacy_dir = tmp_path / "legacy"
+    canonical_dir = tmp_path / "canonical"
+    legacy_dir.mkdir()
+    canonical_dir.mkdir()
+    (legacy_dir / "settings.yaml").write_text("app:\n  name: legacy\n", encoding="utf-8")
+    (canonical_dir / "settings.yaml").write_text("app:\n  name: canonical\n", encoding="utf-8")
+
+    monkeypatch.setenv("FASTAPIEX__BASE_DIR", str(legacy_dir))
+    monkeypatch.setenv("FASTAPIEX__SETTINGS__PATH", str(canonical_dir))
+
+    assert GetSettings(target=AppSettings, field="name") == "canonical"
 
 
 def test_snapshot_control_env_prefix_reprojects_env_from_raw(
@@ -1119,6 +1156,62 @@ def test_custom_yaml_loader_can_own_explicit_file_mode_without_local_file(tmp_pa
     os.environ["FASTAPIEX__SETTINGS__PATH"] = str(missing_file)
     init_settings()
     assert GetSettings(target=AppSettings, field="name") == "remote"
+
+
+def test_unsupported_explicit_file_extension_fails_clearly(tmp_path: Path) -> None:
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str = "default"
+
+    settings_file = tmp_path / "settings.toml"
+    settings_file.write_text('app = { name = "toml" }\n', encoding="utf-8")
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+
+    with pytest.raises(SettingsValidationError, match="unsupported explicit settings file extension '.toml'"):
+        init_settings()
+
+
+def test_custom_config_source_can_own_non_yaml_explicit_file(tmp_path: Path) -> None:
+    @Settings("app")
+    class AppSettings(BaseSettings):
+        name: str
+
+    settings_file = tmp_path / "settings.toml"
+    settings_file.write_text('app = { name = "toml" }\n', encoding="utf-8")
+
+    manager = get_settings_manager()
+    manager.register_source(
+        SourceSpec(
+            name="toml",
+            priority=4,
+            projection_kind="mapping",
+            policy=SourcePolicy(
+                auto_refresh=False,
+                manual_refresh=True,
+                follow_context=True,
+            ),
+            bind=lambda context: SourceBinding(source="toml", descriptor=context.settings_path),
+            probe=lambda binding: binding.descriptor,
+            load=lambda binding: LoadedSource(
+                token=binding.descriptor,
+                payload={"app": {"name": "custom-toml"}},
+            ),
+            role="config_file",
+            supports_context=lambda context: (
+                context.path_mode == "explicit_file" and context.settings_path.suffix.lower() == ".toml"
+            ),
+        )
+    )
+    os.environ["FASTAPIEX__SETTINGS__PATH"] = str(settings_file)
+
+    init_settings()
+
+    runtime_view = manager.inspect_runtime()
+    assert runtime_view is not None
+    assert runtime_view.context.settings_path == settings_file.resolve()
+    assert GetSettings(target=AppSettings, field="name") == "custom-toml"
+    assert {snapshot.source for snapshot in runtime_view.snapshots} >= {"toml", "dotenv", "env"}
+    assert "yaml" not in {snapshot.source for snapshot in runtime_view.snapshots}
 
 
 def test_dotenv_path_switch_sync_can_be_enabled_explicitly(

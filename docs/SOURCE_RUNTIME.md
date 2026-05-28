@@ -35,10 +35,12 @@ Every source is described by a spec:
 - `priority`
 - `projection_kind`
 - `policy`
+- `role`
 - `bind(context) -> SourceBinding`
 - `probe(binding) -> token`
 - `load(binding) -> LoadedSource`
 - `validate_final_binding(context, binding) -> None`
+- `supports_context(context) -> bool`
 
 Builtins (`yaml`, `dotenv`, `env`) use the same contract as custom sources.
 
@@ -79,9 +81,17 @@ No partial state is published.
 
 Rules:
 
-- explicit file paths are exact targets
+- `settings.path` is the only explicit settings path control
+- when `settings.path` is absent, `FASTAPIEX__BASE_DIR` is the first fallback anchor
+- when both are absent, the process startup directory is the second fallback anchor
+- existing directories and trailing-slash paths create a directory anchor
 - directory anchors resolve to `${anchor_dir}/settings.yaml`
+- existing files create an explicit file target
+- missing paths with a suffix create an explicit file target
+- missing paths without a suffix create a directory anchor
+- explicit file paths are exact targets and are not rewritten by extension
 - path-cycle detection is keyed by context target identity, not by full context object
+- file-format support belongs to source specs, not to path parsing
 
 ## Source Policies
 
@@ -94,11 +104,15 @@ Rules:
 
 Builtin defaults:
 
-- `yaml`: auto + manual + follow-context
+- `yaml`: config-file source; auto + manual + follow-context; supports directory anchors and explicit `.yaml` / `.yml`
 - `dotenv`: static by default
 - `env`: static by default
 
 Opting a source into runtime behavior means replacing its `SourceSpec`.
+
+`supports_context` controls whether a source participates for the current resolved target. If a source does not
+support the current target, its previous snapshot is removed from the candidate runtime before projection. This lets
+future config-file sources such as TOML own `.toml` targets without the builtin YAML source trying to parse them first.
 
 ## Priority / LWW
 
@@ -119,6 +133,9 @@ If a source cares about explicit file existence, it declares that in `validate_f
 
 Builtin `yaml` keeps the conservative local-file check.
 Custom `yaml` implementations may replace or remove that validator.
+
+If an explicit file target is selected and no registered `config_file` source supports it, the refresh fails with
+`SettingsValidationError` instead of silently treating the path as a directory anchor.
 
 ## Public Extension Surface
 

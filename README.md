@@ -286,9 +286,19 @@ Module members:
 
 Sources:
 
-- `yaml` (`settings.yaml`)
+- `yaml` (`settings.yaml`, or explicit `.yaml` / `.yml` files)
 - `.env` file
 - process `os.environ`
+
+Path target semantics:
+
+- `settings.path` is the only explicit settings path control, and it may point to either a file or a directory.
+- `FASTAPIEX__BASE_DIR` is a fallback anchor used only when `settings.path` is not set.
+- directory anchors resolve to `${anchor_dir}/settings.yaml`.
+- existing files are explicit file targets.
+- missing paths with a suffix (for example `settings.toml`) are explicit file targets.
+- missing paths without a suffix are directory anchors.
+- the builtin `yaml` source supports directory anchors and explicit `.yaml` / `.yml` files; other explicit extensions require a registered config source that supports them.
 
 Merge strategy:
 
@@ -361,7 +371,7 @@ Plain-key behavior:
 Supported controls:
 
 - `FASTAPIEX__SETTINGS__PATH`
-- `FASTAPIEX__BASE_DIR`
+- `FASTAPIEX__BASE_DIR` (fallback anchor used when `FASTAPIEX__SETTINGS__PATH` is not set)
 - `FASTAPIEX__SETTINGS__ENV_PREFIX`
 - `FASTAPIEX__SETTINGS__CASE_SENSITIVE`
 - `FASTAPIEX__SETTINGS__RELOAD`
