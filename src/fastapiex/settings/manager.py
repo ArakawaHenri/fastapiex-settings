@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
@@ -23,6 +24,7 @@ from .registry import get_settings_registry
 from .runtime_state import RuntimeInspection, RuntimeState, inspect_runtime_state
 from .schema import BuiltSchema, build_root_settings_model
 from .source_contract import SourceRegistry, SourceSpec
+from .specs import SectionSpec
 from .types import ReloadMode, SourceName, SourceSyncMode
 
 logger = logging.getLogger(__name__)
@@ -153,6 +155,8 @@ class SettingsManager:
         self._ensure_runtime_locked(implicit=implicit_init)
         runtime = self._active_runtime_locked()
         sources_changed = runtime.sources_version != self._sources.version()
+        previous_settings = runtime.settings
+        previous_sections = () if self._schema is None else self._schema.sections
 
         candidate = CandidateRuntime(
             last_rev=runtime.last_rev,
@@ -183,7 +187,15 @@ class SettingsManager:
             return
 
         try:
-            self._commit_candidate_locked(candidate=candidate, reason=reason)
+            if force_refresh or sources_changed or candidate.changed:
+                self._commit_candidate_locked(candidate=candidate, reason=reason)
+            else:
+                self._commit_schema_delta_locked(
+                    candidate=candidate,
+                    reason=reason,
+                    previous_settings=previous_settings,
+                    previous_sections=previous_sections,
+                )
         except Exception as exc:
             if refresh_mode == "auto":
                 self._warn_auto_refresh_failure_locked(candidate.context, exc)
@@ -409,6 +421,36 @@ class SettingsManager:
             candidate.context.settings_path,
         )
 
+    def _commit_schema_delta_locked(
+        self,
+        *,
+        candidate: CandidateRuntime,
+        reason: str,
+        previous_settings: BaseModel,
+        previous_sections: tuple[SectionSpec, ...],
+    ) -> None:
+        schema = self._ensure_schema_locked()
+        settings = self._validate_schema_delta_locked(
+            context=candidate.context,
+            snapshots=candidate.snapshots,
+            schema=schema,
+            previous_settings=previous_settings,
+            previous_sections=previous_sections,
+        )
+        self._runtime = RuntimeState(
+            sources_version=self._sources.version(),
+            last_rev=candidate.last_rev,
+            context=candidate.context,
+            snapshots=candidate.snapshots,
+            settings=settings,
+        )
+        logger.info(
+            "settings schema refreshed reason=%s registry_version=%s path=%s",
+            reason,
+            self._registry_version,
+            candidate.context.settings_path,
+        )
+
     def _build_candidate_locked(
         self,
         *,
@@ -434,16 +476,63 @@ class SettingsManager:
         snapshots: Mapping[str, Any],
         schema: BuiltSchema,
     ) -> BaseModel:
+        projected = self._project_snapshots_for_validation_locked(
+            context=context,
+            snapshots=snapshots,
+            schema=schema,
+        )
+        return self._validate_projected_payload(projected=projected, schema=schema)
+
+    def _validate_schema_delta_locked(
+        self,
+        *,
+        context: ConfigContext,
+        snapshots: Mapping[str, Any],
+        schema: BuiltSchema,
+        previous_settings: BaseModel,
+        previous_sections: tuple[SectionSpec, ...],
+    ) -> BaseModel:
+        projected_raw = self._project_snapshots_for_validation_locked(
+            context=context,
+            snapshots=snapshots,
+            schema=schema,
+        )
+        projected = deepcopy(previous_settings.model_dump(mode="python"))
+        previous_by_path = {section.path: section for section in previous_sections}
+
+        for section in schema.sections:
+            previous = previous_by_path.get(section.path)
+            if previous is not None and previous.kind == section.kind and previous.model is section.model:
+                continue
+
+            found, value = _lookup_nested_mapping(projected_raw, section.path)
+            if found:
+                _set_nested_mapping(projected, section.path, value)
+            else:
+                _delete_nested_mapping(projected, section.path)
+
+        return self._validate_projected_payload(projected=projected, schema=schema)
+
+    def _project_snapshots_for_validation_locked(
+        self,
+        *,
+        context: ConfigContext,
+        snapshots: Mapping[str, Any],
+        schema: BuiltSchema,
+    ) -> dict[str, Any]:
         raw = materialize_effective_snapshot(
             build_entries_from_runtime_snapshots(snapshots, sources=self._sources),
             env_prefix=context.env_prefix,
             case_sensitive=context.case_sensitive,
         )
-        projected = project_snapshot_for_validation(
+        return project_snapshot_for_validation(
             raw,
             root_model=schema.root_model,
             case_sensitive=context.case_sensitive,
         )
+
+    @staticmethod
+    def _validate_projected_payload(*, projected: Mapping[str, Any], schema: BuiltSchema) -> BaseModel:
         try:
             return schema.root_model.model_validate(projected)
         except ValidationError as exc:
@@ -497,3 +586,33 @@ def inspect_runtime() -> RuntimeInspection | None:
 
 def unregister_source(name: SourceName) -> None:
     get_settings_manager().unregister_source(name)
+
+
+def _lookup_nested_mapping(mapping: Mapping[str, Any], path: tuple[str, ...]) -> tuple[bool, Any]:
+    cursor: Any = mapping
+    for part in path:
+        if not isinstance(cursor, Mapping) or part not in cursor:
+            return (False, None)
+        cursor = cursor[part]
+    return (True, deepcopy(cursor))
+
+
+def _set_nested_mapping(target: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
+    cursor = target
+    for part in path[:-1]:
+        existing = cursor.get(part)
+        if not isinstance(existing, dict):
+            existing = {}
+            cursor[part] = existing
+        cursor = existing
+    cursor[path[-1]] = deepcopy(value)
+
+
+def _delete_nested_mapping(target: dict[str, Any], path: tuple[str, ...]) -> None:
+    cursor = target
+    for part in path[:-1]:
+        next_value = cursor.get(part)
+        if not isinstance(next_value, dict):
+            return
+        cursor = next_value
+    cursor.pop(path[-1], None)

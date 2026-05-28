@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .context import ConfigContext
-from .types import ProjectionKind, SourceDescriptor, SourceName, SourceToken
+from .types import ProjectionKind, SourceDescriptor, SourceName, SourceRole, SourceToken
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,7 @@ BindingBuilder = Callable[[ConfigContext], SourceBinding]
 SourceProbe = Callable[[SourceBinding], SourceToken]
 SourceLoader = Callable[[SourceBinding], LoadedSource]
 BindingValidator = Callable[[ConfigContext, SourceBinding], None]
+ContextPredicate = Callable[[ConfigContext], bool]
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,8 @@ class SourceSpec:
     probe: SourceProbe
     load: SourceLoader
     validate_final_binding: BindingValidator | None = None
+    role: SourceRole = "ambient"
+    supports_context: ContextPredicate | None = None
 
 
 class SourceRegistry:
@@ -77,6 +80,7 @@ class SourceRegistry:
 __all__ = [
     "BindingBuilder",
     "BindingValidator",
+    "ContextPredicate",
     "LoadedSource",
     "SourceBinding",
     "SourceLoader",
